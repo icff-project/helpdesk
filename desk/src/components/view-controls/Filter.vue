@@ -161,6 +161,7 @@
 import { Link, StarRating } from "@/components";
 import FilterIcon from "@/components/icons/FilterIcon.vue";
 import { useScreenSize } from "@/composables/screen";
+import { useDebounceFn } from "@vueuse/core";
 import {
   Autocomplete,
   Button,
@@ -492,7 +493,7 @@ function updateValue(value, filter) {
   } else {
     filter.value = value;
   }
-  apply();
+  debouncedApply();
 }
 
 function updateOperator(event, filter) {
@@ -672,4 +673,14 @@ const timespanOptions = [
     value: "next year",
   },
 ];
+
+const debouncedApply = useDebounceFn(() => {
+  apply();
+}, 500);
 </script>
+<style>
+& #operator button,
+& #value button {
+  width: 100%;
+}
+</style>

@@ -178,6 +178,12 @@ const htmlContent = computed(
       .email-content :where(img):not(:where([class~='not-prose'], [class~='not-prose'] *)) {
         margin: 0;
       }
+      .email-content :where(blockquote p:first-of-type):not(:where([class~='not-prose'], [class~='not-prose'] *))::before {
+        content: none;
+      }
+      .email-content :where(blockquote p:last-of-type):not(:where([class~='not-prose'], [class~='not-prose'] *))::after {
+        content: none;
+      }
 
     </style>
   </head>
@@ -204,6 +210,13 @@ watch(iframeRef, (iframe) => {
       if (font) emailContent.classList.add(font);
 
       iframe.style.height = parent.offsetHeight + 1 + "px";
+
+      // Clicks inside the iframe don't bubble to the parent document, popovers/dropdowns that close on outside-click never fire.
+      iframe.contentDocument?.addEventListener("pointerdown", () => {
+        document.dispatchEvent(
+          new PointerEvent("pointerdown", { bubbles: true })
+        );
+      });
 
       const replyCollapsers = emailContent.querySelectorAll(".replyCollapser");
       if (replyCollapsers.length) {
