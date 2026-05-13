@@ -32,7 +32,7 @@ export interface HDTicketStatus extends DocType {
   parsed_color?: string;
 }
 
-// Last updated: 2026-04-30 19:58:44.919596
+// Last updated: 2026-05-07 14:35:56.356727
 export interface HDTicket extends DocType {
   /** Subject: Data */
   subject: string;
@@ -118,6 +118,10 @@ export interface HDTicket extends DocType {
   last_customer_response?: string;
   /** Ticket raised outside working hours: Check */
   raised_outside_working_hours: 0 | 1;
+  /** First Response Failed By: Duration */
+  first_response_failed_by?: number;
+  /** Resolution Failed By: Duration */
+  resolution_failed_by?: number;
 }
 
 // Last updated: 2026-03-03 12:30:01.394107
@@ -266,4 +270,24 @@ export interface HDAgent extends DocType {
   is_active: 0 | 1;
   /** Image: Attach Image */
   user_image?: string;
+}
+
+// Last updated: 2022-12-22 18:52:50.658355
+export interface HDTeamMember extends ChildDocType {
+  /** User: Link (User) */
+  user?: string;
+}
+
+// Last updated: 2026-05-11 13:28:58.204342
+export interface HDTeam extends DocType {
+  /** Name: Data */
+  team_name: string;
+  /** Assignment Rule: Link (Assignment Rule) */
+  assignment_rule?: string;
+  /** Users: Table MultiSelect (HD Team Member) */
+  users: HDTeamMember[];
+  /** Ignore Restrictions: Check */
+  ignore_restrictions: 0 | 1;
+  /** Disabled: Check */
+  disabled: 0 | 1;
 }
