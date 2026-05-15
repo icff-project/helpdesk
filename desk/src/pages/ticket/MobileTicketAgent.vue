@@ -66,7 +66,7 @@
                 <!-- feedback component -->
                 <TicketFeedback
                   v-if="ticket.doc?.feedback_rating"
-                  class="border-b px-6 py-3 text-base text-gray-600"
+                  class="border-b px-6 py-3 text-base text-ink-gray-5"
                   :ticket="ticket.doc"
                 />
                 <!-- SLA Section -->
@@ -105,7 +105,7 @@
             </template>
           </Tabs>
           <CommunicationArea
-            class="sticky bottom-0 z-50 bg-white"
+            class="sticky bottom-0 z-50 bg-surface-white"
             ref="communicationAreaRef"
             v-model="ticket.doc"
             :ticketId="ticket.doc?.name"
@@ -254,7 +254,7 @@ const subjectInput = ref(null);
 const showPhoneModal = ref(false);
 const customActions = ref([]);
 
-type ticketId = string | number;
+type ticketId = string;
 
 const props = defineProps({
   ticketId: {
