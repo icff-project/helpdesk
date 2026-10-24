@@ -9,10 +9,10 @@ import {
   call,
   createListResource,
   createResource,
-  FeatherIcon,
   toast,
 } from "frappe-ui";
-import { computed, h, ref, watch } from "vue";
+import { Icon } from "frappe-ui/experimental";
+import { computed, h, ref, unref, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
 
 const debouncedSetValue = useDebounceFn(
@@ -201,10 +201,10 @@ export function useView(dt: string = null) {
       {
         group: __("Default Views"),
         hideLabel: true,
-        items: [
+        options: [
           {
             label: __("Duplicate"),
-            icon: h(FeatherIcon, { name: "copy" }),
+            icon: h(Icon, { name: "copy" }),
             onClick: () => {
               viewDialogConfig.view.label = _view.label + " (New)";
               viewDialogConfig.view.icon = _view.icon;
@@ -219,7 +219,7 @@ export function useView(dt: string = null) {
 
     if (!_view.public || auth.isManager) {
       if (!_view.public && !_view.is_standard) {
-        actions[0].items.push({
+        actions[0].options.push({
           label: _view?.pinned ? __("Unpin View") : __("Pin View"),
           icon: h(_view?.pinned ? UnpinIcon : PinIcon, { class: "h-4 w-4" }),
           onClick: () =>
@@ -227,11 +227,11 @@ export function useView(dt: string = null) {
         });
       }
       if (_view?.is_standard && auth.isManager) {
-        actions[0].items.push({
+        actions[0].options.push({
           label: _view?.public
             ? __("Hide from sidebar")
             : __("Show in sidebar"),
-          icon: h(FeatherIcon, {
+          icon: h(Icon, {
             name: _view?.public ? "eye-off" : "eye",
             class: "h-4 w-4",
           }),
@@ -248,10 +248,10 @@ export function useView(dt: string = null) {
       }
       if (!_view.is_standard) {
         if (auth.isManager && !isCustomerPortal.value) {
-          actions[0].items.push({
+          actions[0].options.push({
             label: _view?.public ? __("Make Private") : __("Make Public"),
-            icon: h(FeatherIcon, {
-              name: _view?.public ? "lock" : "unlock",
+            icon: h(Icon, {
+              name: _view?.public ? "lock" : "lock-open",
               class: "h-4 w-4",
             }),
             onClick: () =>
@@ -265,7 +265,7 @@ export function useView(dt: string = null) {
               ),
           });
         }
-        actions[0].items.push({
+        actions[0].options.push({
           label: __("Edit"),
           icon: h(EditIcon, { class: "h-4 w-4" }),
           onClick: () => {
@@ -279,7 +279,7 @@ export function useView(dt: string = null) {
         actions.push({
           group: __("Delete View"),
           hideLabel: true,
-          items: [
+          options: [
             {
               label: __("Delete"),
               icon: "lucide-trash-2",
@@ -305,7 +305,7 @@ export function useView(dt: string = null) {
         {
           label: __("Confirm"),
           variant: "solid",
-          iconLeft: "trash-2",
+          iconLeft: "lucide-trash-2",
           theme: "red",
           onClick({ close }: any) {
             if (route.query.view === _view.name) {
@@ -390,8 +390,13 @@ export function useView(dt: string = null) {
         route_name: router.currentRoute.value.name as string,
         order_by: list?.params.order_by,
         filters: JSON.stringify(list?.params.filters),
-        columns: JSON.stringify(list?.data.columns),
-        rows: JSON.stringify(list?.data?.rows),
+        // a grouped list never loads its records, so fall back to the view's own columns
+        columns: JSON.stringify(list?.data?.columns ?? list?.params.columns),
+        rows: JSON.stringify(list?.data?.rows ?? list?.params.rows),
+        // a reactive list unwraps the grouping ref, so read it either way
+        list_group_by: unref(list?.groupBy)
+          ? JSON.stringify(unref(list.groupBy))
+          : "",
         pinned: viewInfo.pinned ?? false,
         public: viewInfo.public ?? false,
         is_customer_portal: isCustomerPortal.value,

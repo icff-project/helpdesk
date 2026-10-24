@@ -1,11 +1,11 @@
 <template>
   <Popover
-    class="flex w-full"
-    placement="bottom-start"
-    :matchTargetWidth="true"
-    v-model:show="popoverIsOpen"
+    side="bottom"
+    align="start"
+    :matchTriggerWidth="true"
+    v-model:open="popoverIsOpen"
   >
-    <template #target="{ togglePopover }">
+    <template #trigger>
       <div class="flex flex-col gap-1.5 w-full">
         <span v-if="!hideLabel" class="block text-base text-ink-gray-5">
           {{ __("Assignee") }}
@@ -17,14 +17,13 @@
           :class="
             ghost
               ? [
-                  '!h-7 !rounded !border !border-transparent !bg-surface-base !px-2 hover:!bg-surface-base focus:focus-ring',
+                  '!h-7 !rounded-4 !border !border-transparent !bg-surface-base !px-2 hover:!bg-surface-base focus:focus-ring',
                   // Hold the ring while the dropdown is open, mirroring the Link
                   // field's data-[state=open]:focus-ring (focus lives in the popover).
                   popoverIsOpen && 'focus-ring',
                 ]
               : 'hover:shadow-sm'
           "
-          @click="togglePopover()"
         >
           <div class="flex items-center min-h-5 gap-2 w-full min-w-0">
             <template v-if="localAssignees.length > 0">
@@ -44,9 +43,9 @@
               <span v-if="ghost" class="text-ink-gray-4">
                 {{ __("Set Assignee") }}...
               </span>
-              <span v-else class="text-ink-gray-5 leading-5">{{
-                __("No one")
-              }}</span>
+              <span v-else class="text-ink-gray-5 leading-5">
+                {{ emptyLabel }}
+              </span>
             </template>
           </div>
           <template #suffix>
@@ -68,8 +67,8 @@
     </template>
     <!-- body-main (not body) so the shared PopoverPanel supplies the shell
          chrome and the combobox's scale-from-trigger open animation. -->
-    <template #body-main="{ isOpen }">
-      <!-- Pin to the trigger width. matchTargetWidth only sets min-width, so the
+    <template #default="{ open: isOpen }">
+      <!-- Pin to the trigger width. matchTriggerWidth only sets min-width, so the
            panel is otherwise shrink-to-fit and grows to the widest agent name
            (then collapses as you filter) -> width jitter. Fixing the width lets
            the rows' min-w-0 truncate instead. -->
@@ -111,7 +110,7 @@
                 v-for="(agent, index) in sortedAgentOptions"
                 :key="agent.value"
                 :ref="(el) => setOptionRef(index, el as Element)"
-                class="group flex h-7 w-full items-center rounded px-2 text-base text-ink-gray-6 gap-2"
+                class="group flex h-7 w-full items-center rounded-4 px-2 text-base text-ink-gray-6 gap-2"
                 :class="
                   index === highlightedIndex
                     ? 'bg-surface-gray-3'
@@ -125,7 +124,7 @@
                 />
                 <div class="relative flex-shrink-0">
                   <Tooltip
-                    placement="top"
+                    side="top"
                     :text="
                       availabilitySubtitle(
                         agent.availability,
@@ -169,11 +168,11 @@
 import ShortcutKey from "@/components/ShortcutKey.vue";
 import { useShortcut } from "@/composables/shortcuts";
 import { useAgentStatusStore } from "@/stores/agentStatus.ts";
+import { useConfigStore } from "@/stores/config";
 import { useUserStore } from "@/stores/user";
 import { capture } from "@/telemetry";
 import { __ } from "@/translation";
 import {
-  ActivitiesSymbol,
   AgentOption,
   AssigneeSymbol,
   LocalAssignee,
@@ -187,7 +186,6 @@ import {
   Popover,
   TextInput,
   Tooltip,
-  call,
   createListResource,
   createResource,
   dayjsLocal,
@@ -208,9 +206,17 @@ const props = withDefaults(defineProps<Props>(), {
 
 const { hideLabel, ghost } = props;
 
-const ticket = inject(TicketSymbol)!;
-const assignees = inject(AssigneeSymbol)!;
-const activities = inject(ActivitiesSymbol)!;
+// No ticket in context (bulk assign) means nothing to save to: the picker then
+// just reports its selection through v-model and the parent decides what to do.
+const ticket = inject(TicketSymbol, null);
+const assignees = inject(AssigneeSymbol, null);
+const selection = defineModel<string[]>({ default: () => [] });
+
+// On a ticket the trigger reports state ("No one" is assigned); standalone it is
+// an input still waiting on a choice, so it reads as a placeholder.
+const emptyLabel = computed(() =>
+  ticket ? __("No one") : __("Select agents")
+);
 
 const { getUser } = useUserStore();
 const currentUser = computed(() => getUser("")); // empty string returns current user
@@ -231,7 +237,7 @@ const snapshotAssignees = ref<LocalAssignee[]>([]);
 
 // Sync from injected assignees when popover is not open
 watch(
-  () => assignees.value?.data,
+  () => assignees?.value?.data,
   (data) => {
     if (!popoverIsOpen.value && data) {
       localAssignees.value = [...data];
@@ -239,6 +245,21 @@ watch(
   },
   { immediate: true, deep: true }
 );
+
+// Standalone mode: the selection itself is the output, so publish it live.
+watch(
+  localAssignees,
+  (list) => {
+    if (!ticket) selection.value = list.map((a) => a.name);
+  },
+  { deep: true }
+);
+
+// Standalone mode: let the parent clear the picker (e.g. on dialog open).
+watch(selection, (names) => {
+  if (ticket || names.length || !localAssignees.value.length) return;
+  localAssignees.value = [];
+});
 
 // Watch popover open/close — same pattern as old AssignToBody
 watch(popoverIsOpen, (isOpen) => {
@@ -252,18 +273,33 @@ watch(popoverIsOpen, (isOpen) => {
     searchText.value = "";
     highlightedIndex.value = 0;
     nextTick(() => {
-      inputRef.value?.el?.focus();
+      inputRef.value?.focus();
     });
   } else if (hasBeenOpened.value) {
     // Closing after a real open: compute diff and save
     hasBeenOpened.value = false;
     searchText.value = "";
+    if (!ticket) return;
     const currentNames = localAssignees.value.map((a) => a.name);
     const oldNames = snapshotAssignees.value.map((a) => a.name);
     const added = currentNames.filter((n) => !oldNames.includes(n));
     const removed = oldNames.filter((n) => !currentNames.includes(n));
     saveAssignees(added, removed);
   }
+});
+
+const configStore = useConfigStore();
+const ticketTeam = computed(() => ticket?.value?.doc?.agent_group);
+const restrictToTeam = computed(
+  () =>
+    configStore.teamRestrictionApplied &&
+    configStore.assignWithinTeam &&
+    Boolean(ticketTeam.value)
+);
+const teamMembers = createResource({
+  url: "helpdesk.helpdesk.doctype.hd_team.hd_team.get_team_members",
+  makeParams: () => ({ team: ticketTeam.value }),
+  onSuccess: () => reloadAgents(),
 });
 
 const agentResource = createListResource({
@@ -277,21 +313,40 @@ const agentResource = createListResource({
   ],
   filters: { is_active: true },
   pageLength: 20,
-  auto: true,
 });
 
-const debouncedSearch = useDebounceFn((text: string) => {
+function reloadAgents(text = "") {
   const filters: Record<string, any> = { is_active: true };
   if (text) {
     filters.agent_name = ["like", `%${text}%`];
   }
+  if (restrictToTeam.value) {
+    filters.name = ["in", teamMembers.data || []];
+  }
   agentResource.filters = filters;
   agentResource.reload();
-}, 300);
+}
+
+const debouncedSearch = useDebounceFn(reloadAgents, 300);
+
+function isOfferable(agentName: string) {
+  return !restrictToTeam.value || teamMembers.data?.includes(agentName);
+}
 
 watch(searchText, (text) => {
   debouncedSearch(text);
 });
+
+watch(
+  [restrictToTeam, ticketTeam],
+  ([restricted]) => {
+    if (!restricted) return reloadAgents();
+    // Drop the previous team's members so none stay offerable while fetching.
+    teamMembers.reset();
+    teamMembers.fetch();
+  },
+  { immediate: true }
+);
 
 // Prefer the live status pushed over the socket (agentStatusStore.liveStatuses)
 // so the dot/tooltip reflect any agent's change made elsewhere this session,
@@ -314,7 +369,7 @@ const agentOptions = computed<AgentOption[]>(() => {
 
   // Include current agent only when not searching. Built from the session user
   // and the store's live status (seeded from auth.get_user) — no extra fetch.
-  if (!searchText.value && currentAgentName) {
+  if (!searchText.value && currentAgentName && isOfferable(currentAgentName)) {
     agents.push({
       value: currentAgentName,
       label: currentUser.value.full_name || currentAgentName,
@@ -326,7 +381,7 @@ const agentOptions = computed<AgentOption[]>(() => {
 
   if (agentResource.data) {
     for (const agent of agentResource.data) {
-      if (!seen.has(agent.name)) {
+      if (!seen.has(agent.name) && isOfferable(agent.name)) {
         agents.push({
           value: agent.name,
           label: agent.agent_name || getUser(agent.name).full_name,
@@ -490,22 +545,12 @@ watch(searchText, () => {
   highlightedIndex.value = 0;
 });
 
-async function logActivity(action: string) {
-  await call("frappe.client.insert", {
-    doc: {
-      doctype: "HD Ticket Activity",
-      ticket: ticket.value?.name,
-      action,
-    },
-  });
-}
-
 // triggered when the popover is closed
 const addAssigneesResource = createResource({
   url: "frappe.desk.form.assign_to.add",
   makeParams: (addedAssignees: string[]) => ({
     doctype: "HD Ticket",
-    name: ticket.value?.name,
+    name: ticket?.value?.name,
     assign_to: addedAssignees,
   }),
   onSuccess: () => {
@@ -519,7 +564,7 @@ const removeAssigneesResource = createResource({
   url: "helpdesk.api.doc.remove_assignments",
   makeParams: (removedAssignees: string[]) => ({
     doctype: "HD Ticket",
-    name: ticket.value?.name,
+    name: ticket?.value?.name,
     assignees: removedAssignees,
   }),
 });
@@ -564,11 +609,7 @@ async function saveAssignees(added: string[], removed: string[]) {
       if (addResult?.exc) throw new Error(addResult.exc);
     }
 
-    // Log activity only after API calls succeed
-    const logParts: string[] = [];
-    if (added.length) logParts.push(`assigned ${added.join(", ")}`);
-    if (removed.length) logParts.push(`unassigned ${removed.join(", ")}`);
-    await logActivity(logParts.join(" & "));
+    // core assign_to writes the timeline entry itself
 
     // Delay the success toast when warnings were shown so they land first.
     const successDelay = hasUnavailable ? 1000 : 0;
@@ -576,8 +617,7 @@ async function saveAssignees(added: string[], removed: string[]) {
       toast.success(__("Assignees updated successfully."));
     }, successDelay);
 
-    assignees.value.reload();
-    activities.value.reload();
+    assignees?.value.reload();
   } catch {
     toast.error(__("Failed to update Assignees."));
     localAssignees.value = [...snapshotAssignees.value];

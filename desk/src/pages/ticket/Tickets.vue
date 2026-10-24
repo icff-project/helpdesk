@@ -56,6 +56,16 @@
       :selections="listSelections"
       @success="listViewRef?.unselectAll()"
     />
+    <BulkEditModal
+      v-model="showBulkEditModal"
+      :selections="listSelections"
+      @success="reset(true)"
+    />
+    <BulkAssignModal
+      v-model="showBulkAssignModal"
+      :selections="listSelections"
+      @success="reset(true)"
+    />
   </div>
 </template>
 
@@ -64,6 +74,8 @@ import { LayoutHeader, ListViewBuilder } from "@/components";
 import { TicketIcon } from "@/components/icons";
 import IndicatorIcon from "@/components/icons/IndicatorIcon.vue";
 import TicketPriority from "@/components/TicketPriority.vue";
+import BulkAssignModal from "@/components/ticket-agent/BulkAssignModal.vue";
+import BulkEditModal from "@/components/ticket-agent/BulkEditModal.vue";
 import BulkReplyModal from "@/components/ticket-agent/BulkReplyModal.vue";
 import ExportModal from "@/components/ticket/ExportModal.vue";
 import ViewBreadcrumbs from "@/components/ViewBreadcrumbs.vue";
@@ -76,7 +88,7 @@ import { useTicketStatusStore } from "@/stores/ticketStatus";
 import { __ } from "@/translation";
 import { View } from "@/types";
 import { isCustomerPortal, shortDuration } from "@/utils";
-import { Badge, dayjs, Tooltip, usePageMeta } from "frappe-ui";
+import { Badge, dayjsLocal, Tooltip, usePageMeta } from "frappe-ui";
 import { computed, h, onMounted, onUnmounted, reactive, ref } from "vue";
 import { useRoute, useRouter } from "vue-router";
 
@@ -110,14 +122,31 @@ const { getStatus } = useTicketStatusStore();
 const listSelections = ref(new Set());
 
 const showBulkReplyModal = ref(false);
+const showBulkEditModal = ref(false);
+const showBulkAssignModal = ref(false);
+
+// Replying, assigning and editing in bulk are agent-side actions only.
+const agentOnly = () => !isCustomerPortal.value;
 
 const selectBannerActions = [
   {
-    label: __("Bulk Reply"),
+    label: __("Reply"),
     icon: "lucide-corner-up-left",
+    inline: true,
+    condition: agentOnly,
     onClick: (selections: Set<string>) => {
       listSelections.value = new Set(selections);
       showBulkReplyModal.value = true;
+    },
+  },
+  {
+    label: __("Assign"),
+    icon: "lucide-user-plus",
+    inline: true,
+    condition: agentOnly,
+    onClick: (selections: Set<string>) => {
+      listSelections.value = new Set(selections);
+      showBulkAssignModal.value = true;
     },
   },
   {
@@ -128,10 +157,23 @@ const selectBannerActions = [
       showExportModal.value = true;
     },
   },
+  {
+    label: __("Edit"),
+    icon: "lucide-pencil",
+    condition: agentOnly,
+    onClick: (selections: Set<string>) => {
+      listSelections.value = new Set(selections);
+      showBulkEditModal.value = true;
+    },
+  },
 ];
 
 const options = computed(() => ({
   doctype: "HD Ticket",
+  // agents only for now; customers keep the plain list
+  groupBy: !isCustomerPortal.value,
+  // two fields Helpdesk never fills in, and the per-ticket feedback-link token
+  groupByExclude: ["avg_response_time", "user_resolution_time", "key"],
   columnConfig: {
     subject: {
       custom: ({ row, item }) => {
@@ -211,38 +253,33 @@ const options = computed(() => ({
 
 function handleResponseByField(row: any, item: string) {
   if (!row.sla) return null; // nothing promised, so nothing to report against
-  if (!row.first_responded_on && dayjs(item).isBefore(new Date())) {
-    return h(Badge, {
-      label: __("Failed"),
-      theme: "red",
-      variant: "subtle",
-    });
+  if (row.first_responded_on) {
+    // no target means it was never breached, so responding at all fulfils it
+    const fulfilled =
+      !item || dayjsLocal(row.first_responded_on).isBefore(dayjsLocal(item));
+    return slaOutcomeBadge(fulfilled);
   }
-  if (row.first_responded_on && dayjs(row.first_responded_on).isBefore(item)) {
-    return h(Badge, {
-      label: __("Fulfilled"),
-      theme: "gray",
+  if (!item) return null;
+  if (dayjsLocal(item).isBefore(dayjsLocal())) return slaOutcomeBadge(false);
+  return h(
+    Tooltip,
+    {
+      text: dayjsLocal(item).format("LLLL"),
+    },
+    h(Badge, {
+      label: shortDuration(item),
       variant: "subtle",
-    });
-  } else if (dayjs(row.first_responded_on).isAfter(item)) {
-    return h(Badge, {
-      label: __("Failed"),
-      theme: "red",
-      variant: "subtle",
-    });
-  } else {
-    return h(
-      Tooltip,
-      {
-        text: dayjs(item).format("LLLL"),
-      },
-      h(Badge, {
-        label: shortDuration(item),
-        variant: "subtle",
-        theme: "orange",
-      })
-    );
-  }
+      theme: "amber",
+    })
+  );
+}
+
+function slaOutcomeBadge(fulfilled: boolean) {
+  return h(Badge, {
+    label: fulfilled ? __("Fulfilled") : __("Failed"),
+    theme: fulfilled ? "gray" : "red",
+    variant: "subtle",
+  });
 }
 
 function handleResolutionByField(row: any, item: string) {
@@ -256,28 +293,18 @@ function handleResolutionByField(row: any, item: string) {
     });
   }
   if (row.resolution_date) {
-    const fulfilled = dayjs(row.resolution_date).isBefore(
-      dayjs(row.resolution_by)
-    );
-    return h(Badge, {
-      label: fulfilled ? __("Fulfilled") : __("Failed"),
-      theme: fulfilled ? "gray" : "red",
-      variant: "subtle",
-    });
+    const fulfilled =
+      !item || dayjsLocal(row.resolution_date).isBefore(dayjsLocal(item));
+    return slaOutcomeBadge(fulfilled);
   }
+  if (!item) return null;
   // In progress but the resolution deadline has already passed.
-  if (dayjs(item).isBefore(dayjs())) {
-    return h(Badge, {
-      label: __("Failed"),
-      theme: "red",
-      variant: "subtle",
-    });
-  }
+  if (dayjsLocal(item).isBefore(dayjsLocal())) return slaOutcomeBadge(false);
   // In progress with a future deadline: show the live countdown.
   return h(
     Tooltip,
     {
-      text: dayjs(item).format("LLLL"),
+      text: dayjsLocal(item).format("LLLL"),
     },
     h(Badge, {
       label: shortDuration(item),
@@ -333,8 +360,8 @@ function reset(reload = false) {
 const slaStatusColorMap = {
   Fulfilled: "gray",
   Failed: "red",
-  "Resolution Due": "orange",
-  "First Response Due": "orange",
+  "Resolution Due": "amber",
+  "First Response Due": "amber",
   Paused: "blue",
 };
 
@@ -352,10 +379,10 @@ const dropdownOptions = computed(() => {
   const items = [
     {
       group: __("Default Views"),
-      items: [
+      options: [
         {
           label: __("List View"),
-          icon: "lucide-align-justify",
+          icon: "lucide-text-align-justify",
           onClick: () =>
             router.push({
               name: isCustomerPortal.value ? "TicketsCustomer" : "TicketsAgent",
@@ -369,13 +396,13 @@ const dropdownOptions = computed(() => {
   if (getCurrentUserViews.value?.length !== 0) {
     items.push({
       group: __("Saved Views"),
-      items: parseViews(getCurrentUserViews.value),
+      options: parseViews(getCurrentUserViews.value),
     });
   }
   if (pinnedViews.value?.length !== 0) {
     items.push({
       group: __("Private Views"),
-      items: parseViews(pinnedViews.value),
+      options: parseViews(pinnedViews.value),
     });
   }
 
@@ -390,13 +417,13 @@ const dropdownOptions = computed(() => {
 
   items.push({
     group: __("Public Views"),
-    items: parseViews(uniquePublicViews),
+    options: parseViews(uniquePublicViews),
   });
 
   items.push({
     group: __("Create View"),
     hideLabel: true,
-    items: [
+    options: [
       {
         label: __("Create View"),
         icon: "lucide-plus",
