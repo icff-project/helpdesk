@@ -5,33 +5,62 @@ from datetime import timedelta
 from unittest.mock import patch
 
 import frappe
+from frappe.client import get as client_get
+from frappe.client import save as client_save
+from frappe.client import set_value as client_set_value
+from frappe.desk.form.utils import add_comment as desk_add_comment
 from frappe.tests import IntegrationTestCase
 from frappe.utils import add_to_date, get_datetime, getdate, now_datetime
 
 from helpdesk.api.ticket import bulk_reply
-from helpdesk.consts import DEFAULT_SLA
+from helpdesk.consts import DEFAULT_SLA, DEFAULT_TICKET_TEMPLATE
 from helpdesk.helpdesk.doctype.hd_ticket.api import (
+    get_communications,
+    get_one,
+    get_timeline_changes,
     merge_ticket,
-    show_outside_hours_banner,
+    new,
     split_ticket,
 )
-from helpdesk.helpdesk.doctype.hd_ticket.hd_ticket import close_tickets_after_n_days
+from helpdesk.helpdesk.doctype.hd_ticket.hd_ticket import (
+    close_tickets_after_n_days,
+    has_permission,
+    permission_query,
+)
+from helpdesk.helpdesk.doctype.hd_ticket_template.api import get_one as get_ticket_form
 from helpdesk.test_utils import (
     SLA_PRIORITY_NAME,
     add_comment,
     add_contact_in_customer,
     add_holiday,
+    add_message,
+    create_agent,
     create_contact,
     create_customer,
+    default_template_rows,
     get_current_week_monday,
+    get_custom_field_permlevel,
+    get_customer_ticket,
     get_latest_ticket_communication,
     get_priority_response_resolution_time,
+    is_outside_hours_banner_shown,
+    make_agent,
+    make_feedback_option,
+    make_form_script,
+    make_notification_log,
     make_priority,
     make_sla,
     make_status,
+    make_team,
+    make_template,
     make_ticket,
+    other_priority,
     remove_holidays,
+    set_custom_field_permlevel,
+    set_default_template_rows,
     set_ticket_status_and_communication_date,
+    ticket_field_permlevel,
+    unique_email,
     update_role_in_customer,
     upload_test_file,
 )
@@ -114,6 +143,56 @@ class TestHDTicket(IntegrationTestCase):
         ticket.insert()
         self.assertTrue(ticket.name)
 
+    def test_update_perms_skipped_without_a_previous_version(self):
+        # a before_insert hook that persists the ticket clears __islocal, so is_new()
+        # can be False on create while there is still no previous version to check
+        frappe.set_user(non_agent)
+        ticket = frappe.get_doc({**get_ticket_obj(), "via_customer_portal": 1})
+        ticket.set("__islocal", False)
+        ticket.check_update_perms()
+        frappe.set_user("Administrator")
+
+    def test_update_perms_blocked_on_a_reopened_rated_ticket(self):
+        feedback_option = make_feedback_option("Reopened rating")
+        self.addCleanup(
+            frappe.delete_doc, feedback_option.doctype, feedback_option.name, force=True
+        )
+        reopened = self._edit_as_customer("Open", feedback=feedback_option.name)
+        with self.assertRaises(frappe.PermissionError):
+            reopened.check_update_perms()
+
+    def test_update_perms_blocked_on_a_closed_ticket(self):
+        with self.assertRaises(frappe.PermissionError):
+            self._edit_as_customer("Closed").check_update_perms()
+
+    def _edit_as_customer(self, status: str, **values):
+        ticket = frappe.get_doc({**get_ticket_obj(), "via_customer_portal": 1}).insert()
+        ticket.db_set({"status": status, **values})
+        frappe.set_user(non_agent)
+        self.addCleanup(frappe.set_user, "Administrator")
+        edited = frappe.get_doc("HD Ticket", ticket.name)
+        edited.subject = "Edited by the customer"
+        edited.load_doc_before_save()
+        return edited
+
+    def test_a_message_is_marked_by_its_author_s_role(self):
+        """A deactivated agent keeps the role; the HD Agent record decides."""
+        # own agent: deactivating the shared one leaks into later tests
+        sender = create_agent(unique_email("marked-agent")).name
+        ticket = make_ticket()
+        add_message(ticket.name, "Received", sender)
+        add_message(ticket.name, "Received", non_agent)
+
+        self.assertEqual(
+            self.agent_senders(ticket.name) & {sender, non_agent}, {sender}
+        )
+
+        frappe.db.set_value("HD Agent", sender, "is_active", 0)
+        self.assertNotIn(sender, self.agent_senders(ticket.name))
+
+    def agent_senders(self, ticket_name: str) -> set[str]:
+        return {c.sender for c in get_communications(ticket_name) if c.is_agent}
+
     def test_parse_content_strips_html_comments(self):
         ticket = frappe.get_doc(get_ticket_obj())
         ticket.insert()
@@ -133,12 +212,14 @@ class TestHDTicket(IntegrationTestCase):
         ticket.assign_agent(agent)
         ticket.assign_agent(agent2)
         notification = frappe.get_all(
-            "HD Notification",
+            "Notification Log",
             filters={
-                "reference_ticket": ticket.name,
-                "notification_type": "Assignment",
-                "user_to": ["in", [agent, agent2]],
-                "user_from": "Administrator",
+                "document_type": "HD Ticket",
+                "document_name": ticket.name,
+                "type": "Assignment",
+                "app": "helpdesk",
+                "for_user": ["in", [agent, agent2]],
+                "from_user": "Administrator",
             },
         )
         self.assertEqual(len(notification), 2)
@@ -151,12 +232,14 @@ class TestHDTicket(IntegrationTestCase):
         self.assertTrue(ticket)
 
         notification = frappe.get_all(
-            "HD Notification",
+            "Notification Log",
             filters={
-                "reference_ticket": ticket.name,
-                "notification_type": "Reaction",
-                "user_to": ["in", [agent, agent2]],
-                "user_from": "Administrator",
+                "document_type": "HD Ticket",
+                "document_name": ticket.name,
+                "type": "Ticket Reopened",
+                "app": "helpdesk",
+                "for_user": ["in", [agent, agent2]],
+                "from_user": "Administrator",
             },
         )
         self.assertEqual(len(notification), 2)
@@ -175,12 +258,14 @@ class TestHDTicket(IntegrationTestCase):
 
         ticket.assign_agent(non_agent)
         notification = frappe.get_all(
-            "HD Notification",
+            "Notification Log",
             filters={
-                "reference_ticket": ticket.name,
-                "notification_type": "Assignment",
-                "user_to": non_agent,
-                "user_from": "Administrator",
+                "document_type": "HD Ticket",
+                "document_name": ticket.name,
+                "type": "Assignment",
+                "app": "helpdesk",
+                "for_user": non_agent,
+                "from_user": "Administrator",
             },
         )
         self.assertEqual(len(notification), 1)
@@ -201,6 +286,14 @@ class TestHDTicket(IntegrationTestCase):
         ticket.status = "Closed"
         ticket.save()
         self.assertTrue(ticket)
+
+    def test_mark_seen_returns_cleared_count(self):
+        ticket = frappe.get_doc(get_ticket_obj()).insert()
+        for name in ("markseen1", "markseen2"):
+            make_notification_log(name, ticket.name, "Administrator", app="helpdesk")
+
+        self.assertEqual(ticket.mark_seen(), 2)
+        self.assertEqual(ticket.mark_seen(), 0, "nothing left to clear")
 
     # Working hours default to 10:00 to 18:00 from Monday to Friday
     # And priorities default to
@@ -484,6 +577,82 @@ class TestHDTicket(IntegrationTestCase):
             # Resolution time should be 1 hour more than the original resolution time
             self.assertEqual(ticket.resolution_time, 60 * 60)
 
+    def test_hold_time_deducted_when_resolved_straight_from_paused(self):
+        # Resolving out of a paused status closes the hold window in the same
+        # save, so that window still has to come off the resolution time.
+        ticket = None
+        date = get_current_week_monday(hours=12)
+        with self.freeze_time(date):
+            ticket = make_ticket(priority="High")
+
+        ticket.reload()
+        with self.freeze_time(add_to_date(date, minutes=30)):
+            ticket.status = "Replied"
+            ticket.save()
+            self.assertEqual(ticket.agreement_status, "Paused")
+
+        # straight to Resolved, with no intermediate un-pause to bank the hold
+        ticket.reload()
+        with self.freeze_time(add_to_date(date, hours=2, minutes=30)):
+            ticket.status = "Resolved"
+            ticket.save()
+            ticket.reload()
+
+            self.assertEqual(ticket.total_hold_time, 2 * 60 * 60)
+            # 2h30m elapsed, 2h of it on hold, leaving the 30m before the pause
+            self.assertEqual(ticket.resolution_time, 30 * 60)
+
+    def test_agreement_status_stays_paused_past_the_deadlines(self):
+        date = get_current_week_monday(hours=12)
+        with self.freeze_time(date):
+            ticket = make_ticket(priority="Urgent")
+
+        ticket.reload()
+        with self.freeze_time(add_to_date(date, minutes=10)):
+            ticket.status = "Replied"
+            ticket.save()
+
+        ticket.reload()
+        with self.freeze_time(add_to_date(date, days=7)):
+            ticket.subject = "Edited while on hold"
+            ticket.save()
+            self.assertEqual(ticket.agreement_status, "Paused")
+
+    def test_agreement_status_keeps_a_breach_from_before_the_hold(self):
+        date = get_current_week_monday(hours=12)
+        with self.freeze_time(date):
+            ticket = make_ticket(priority="Urgent")
+
+        ticket.reload()
+        with self.freeze_time(add_to_date(date, minutes=10)):
+            ticket.first_responded_on = get_datetime()
+            ticket.save()
+
+        # Urgent resolves in 2h, so the hold at 3h starts after the breach.
+        ticket.reload()
+        with self.freeze_time(add_to_date(date, hours=3)):
+            ticket.status = "Replied"
+            ticket.save()
+            self.assertEqual(ticket.agreement_status, "Failed")
+            self.assertLess(ticket.first_responded_on, ticket.response_by)
+
+    def test_resolution_time_kept_when_closed_ticket_set_back_to_resolved(self):
+        # Moving between resolved statuses is not a reopen, so the time spent
+        # resolved must not be counted as hold.
+        date = get_current_week_monday(hours=12)
+        with self.freeze_time(date):
+            ticket = make_ticket(priority="High")
+
+        for minutes, status in ((60, "Resolved"), (90, "Closed"), (180, "Resolved")):
+            ticket.reload()
+            with self.freeze_time(add_to_date(date, minutes=minutes)):
+                ticket.status = status
+                ticket.save()
+
+        ticket.reload()
+        self.assertEqual(ticket.resolution_time, 60 * 60)
+        self.assertFalse(ticket.total_hold_time)
+
     def test_hold_time_resolution_time_with_holiday(self):
         # create friday as holiday
         # create ticket on thursday 5:30 PM with high priority
@@ -652,6 +821,8 @@ class TestHDTicket(IntegrationTestCase):
         add_comment(ticket2.name, "First comment on ticket 2")
 
         merge_ticket(source=ticket1.name, target=ticket2.name)
+        with self.assertRaises(frappe.ValidationError):
+            merge_ticket(source=ticket1.name, target=ticket2.name)
         ticket1.reload()
         self.assertEqual(ticket1.status, "Closed")
         self.assertTrue(ticket1.is_merged)
@@ -659,15 +830,53 @@ class TestHDTicket(IntegrationTestCase):
 
         ticket2.reload()
         comments = frappe.get_all(
-            "HD Ticket Comment",
+            "Comment",
             filters={
-                "reference_ticket": ticket2.name,
+                "reference_doctype": "HD Ticket",
+                "reference_name": ticket2.name,
+                "comment_type": "Comment",
             },
             fields=["content", "name"],
         )
         self.assertEqual(
             len(comments), 3
         )  # 2 original comments + 1 merge comment (Ticket 1 merged into Ticket 2)
+
+    def test_agent_merge_moves_emails_and_every_attachment(self):
+        source = make_ticket(description="Agent merge source")
+        target = make_ticket(description="Agent merge target")
+        for index in range(2):
+            frappe.get_doc(
+                {
+                    "doctype": "File",
+                    "file_name": f"merge-{index}.txt",
+                    "content": f"attachment {index}",
+                    "attached_to_doctype": "HD Ticket",
+                    "attached_to_name": source.name,
+                }
+            ).insert(ignore_permissions=True)
+
+        frappe.set_user(make_agent("merge-agent@example.com"))
+        try:
+            merge_ticket(source=source.name, target=target.name)
+        finally:
+            frappe.set_user("Administrator")
+
+        contents = frappe.get_list(
+            "Communication",
+            filters={"reference_doctype": "HD Ticket", "reference_name": target.name},
+            pluck="content",
+        )
+        self.assertTrue(any("Agent merge source" in c for c in contents))
+        files = frappe.get_list(
+            "File",
+            filters={
+                "attached_to_doctype": "HD Ticket",
+                "attached_to_name": target.name,
+            },
+            pluck="file_name",
+        )
+        self.assertTrue({"merge-0.txt", "merge-1.txt"} <= set(files))
 
     def test_reply_to_merged_ticket_redirects_to_target(self):
         source = make_ticket(description="Merged source")
@@ -750,6 +959,7 @@ class TestHDTicket(IntegrationTestCase):
 
     def test_ticket_split(self):
         ticket1 = make_ticket(description="Test Desc for split")
+        ticket1.db_set({"entry_point": "External", "utm_source": "frappe-cloud"})
 
         ticket1.reply_via_agent(message="Test reply to split")
         communcation_name = frappe.get_all(
@@ -768,6 +978,7 @@ class TestHDTicket(IntegrationTestCase):
         ticket2_doc = frappe.get_doc("HD Ticket", ticket2)
         self.assertTrue(ticket2_doc)
         self.assertEqual(ticket2_doc.subject, "Split Ticket")
+        self.assertFalse(ticket2_doc.entry_point or ticket2_doc.utm_source)
         self.assertTrue(
             frappe.get_value("Communication", communcation_name, "reference_name"),
             ticket2_doc.name,
@@ -808,19 +1019,19 @@ class TestHDTicket(IntegrationTestCase):
             # Ticket created inside working hours
             ticket = make_ticket(priority="High")
             self.assertFalse(ticket.raised_outside_working_hours)
-            banner_shown = show_outside_hours_banner(ticket.name)["show"]
+            banner_shown = is_outside_hours_banner_shown(ticket.name)
             self.assertFalse(banner_shown)
 
         ticket.reload()
         with self.freeze_time(get_current_week_monday(hours=20)):
-            banner_shown = show_outside_hours_banner(ticket.name)["show"]
+            banner_shown = is_outside_hours_banner_shown(ticket.name)
             self.assertFalse(banner_shown)
 
     def test_ticket_outside_working_hours(self):
         outside_working_hour = get_current_week_monday(hours=8)
         with self.freeze_time(outside_working_hour):
             ticket = make_ticket(priority="High")
-            banner_shown = show_outside_hours_banner(ticket.name)["show"]
+            banner_shown = is_outside_hours_banner_shown(ticket.name)
             self.assertTrue(ticket.raised_outside_working_hours)
             self.assertTrue(banner_shown)
 
@@ -828,14 +1039,14 @@ class TestHDTicket(IntegrationTestCase):
         outside_working_hours = get_current_week_monday(hours=8)
         with self.freeze_time(outside_working_hours):
             ticket = make_ticket(priority="High")
-            banner_shown = show_outside_hours_banner(ticket.name)["show"]
+            banner_shown = is_outside_hours_banner_shown(ticket.name)
             self.assertTrue(ticket.raised_outside_working_hours)
             self.assertTrue(banner_shown)
 
         ticket.reload()
         newtime = add_to_date(get_current_week_monday(hours=14), days=1)
         with self.freeze_time(newtime):
-            banner_shown = show_outside_hours_banner(ticket.name)["show"]
+            banner_shown = is_outside_hours_banner_shown(ticket.name)
             self.assertFalse(banner_shown)
             self.assertTrue(ticket.raised_outside_working_hours)
 
@@ -843,7 +1054,7 @@ class TestHDTicket(IntegrationTestCase):
         weekend = add_to_date(get_current_week_monday(), days=5, hours=14)
         with self.freeze_time(weekend):
             ticket = make_ticket(priority="High")
-            banner_shown = show_outside_hours_banner(ticket.name)["show"]
+            banner_shown = is_outside_hours_banner_shown(ticket.name)
             self.assertTrue(ticket.raised_outside_working_hours)
             self.assertTrue(banner_shown)
 
@@ -852,7 +1063,7 @@ class TestHDTicket(IntegrationTestCase):
         with self.freeze_time(outside_working_hour):
             ticket = make_ticket(priority="High")
             ticket.reply_via_agent(message="Test reply to split")
-            banner_shown = show_outside_hours_banner(ticket.name)["show"]
+            banner_shown = is_outside_hours_banner_shown(ticket.name)
             self.assertTrue(ticket.raised_outside_working_hours)
             self.assertFalse(banner_shown)
 
@@ -864,8 +1075,36 @@ class TestHDTicket(IntegrationTestCase):
         ticket.reload()
         next_working_day = add_to_date(get_current_week_monday(hours=20), days=1)
         with self.freeze_time(next_working_day):
-            banner_shown = show_outside_hours_banner(ticket.name)["show"]
+            banner_shown = is_outside_hours_banner_shown(ticket.name)
             self.assertFalse(banner_shown)
+
+    def test_ticket_outside_working_hours_next_day_holiday(self):
+        tuesday = add_to_date(get_current_week_monday(), days=1)
+        add_holiday(getdate(tuesday), "Test Holiday")
+        self.addCleanup(remove_holidays)
+
+        with self.freeze_time(get_current_week_monday(hours=20)):
+            ticket = make_ticket(priority="High")
+            self.assertTrue(ticket.raised_outside_working_hours)
+
+        ticket.reload()
+        with self.freeze_time(add_to_date(get_current_week_monday(hours=14), days=1)):
+            # Tuesday is a holiday, so the banner stays up
+            self.assertTrue(is_outside_hours_banner_shown(ticket.name))
+
+        with self.freeze_time(add_to_date(get_current_week_monday(hours=14), days=2)):
+            # Wednesday is the next working day
+            self.assertFalse(is_outside_hours_banner_shown(ticket.name))
+
+    def test_ticket_raised_on_holiday(self):
+        tuesday_afternoon = add_to_date(get_current_week_monday(hours=14), days=1)
+        add_holiday(getdate(tuesday_afternoon), "Test Holiday")
+        self.addCleanup(remove_holidays)
+
+        with self.freeze_time(tuesday_afternoon):
+            ticket = make_ticket(priority="High")
+            self.assertTrue(ticket.raised_outside_working_hours)
+            self.assertTrue(is_outside_hours_banner_shown(ticket.name))
 
     def test_contact_ticket_visibility(self):
         """
@@ -1114,6 +1353,14 @@ class TestHDTicket(IntegrationTestCase):
         self.assertEqual(contact1_ticket1.customer, customer1.name)
         contact1_ticket2 = make_ticket(customer=customer2.name, save=False)
         self.assertRaises(frappe.ValidationError, contact1_ticket2.save)
+
+    def test_get_one_says_whether_an_agent_replied(self):
+        ticket = make_ticket()
+        self.assertFalse(get_one(ticket.name)["has_agent_replied"])
+
+        ticket.reply_via_agent(message="Test reply")
+
+        self.assertTrue(get_one(ticket.name)["has_agent_replied"])
 
     def test_reply_via_agent_with_only_cc(self):
         """
@@ -1597,6 +1844,42 @@ class TestHDTicket(IntegrationTestCase):
             # resolution_failed_by should be 15 minutes (in business hours seconds)
             self.assertEqual(ticket.resolution_failed_by, 15 * 60)
 
+    def test_failed_by_follows_a_target_change(self):
+        # reply at T+39min misses Urgent's 30 minutes by 9, meets High's hour
+        date = get_current_week_monday(hours=10)
+        with self.freeze_time(date):
+            ticket = make_ticket(priority="Urgent")
+
+        with self.freeze_time(add_to_date(date, minutes=39)):
+            frappe.set_user(agent)
+            ticket.reply_via_agent(message="Late reply")
+            frappe.set_user("Administrator")
+            ticket.reload()
+            self.assertEqual(ticket.first_response_failed_by, 9 * 60)
+
+        with self.freeze_time(add_to_date(date, minutes=40)):
+            ticket.reload()
+            ticket.priority = "High"
+            ticket.save()
+            self.assertIsNone(ticket.first_response_failed_by)
+
+        with self.freeze_time(add_to_date(date, minutes=41)):
+            ticket.reload()
+            ticket.priority = "Urgent"
+            ticket.save()
+            self.assertEqual(ticket.first_response_failed_by, 9 * 60)
+
+    def test_overdue_by_counts_business_hours(self):
+        # Urgent due 17:30 Monday: 10 minutes overdue at 17:40; resolution not yet due
+        date = get_current_week_monday(hours=17)
+        with self.freeze_time(date):
+            ticket = make_ticket(priority="Urgent")
+
+        with self.freeze_time(add_to_date(date, minutes=40)):
+            self.assertEqual(
+                ticket.get_overdue_by(), {"response": 10 * 60, "resolution": None}
+            )
+
     def test_reply_via_agent_default_sender(self):
         """Without `from_email`, sender on the Communication is the session user."""
         ticket = make_ticket()
@@ -1646,6 +1929,7 @@ class TestHDTicket(IntegrationTestCase):
         )
         self.assertEqual(comm.sender, email_account.email_id)
         self.assertEqual(comm.email_account, email_account.name)
+        self.assertEqual(comm.sender_full_name, frappe.utils.get_fullname(agent))
 
     def test_reply_via_agent_with_invalid_from_email_account(self):
         """If `from_email.email_account` does not exist, reply_via_agent should throw."""
@@ -1716,11 +2000,11 @@ class TestHDTicket(IntegrationTestCase):
         self.assertEqual(communication_attachments, 4)
         self.assertEqual(ticket_attachments, 4)
 
-        # delete all files
         files = frappe.get_all(
             "File",
             filters={
                 "attached_to_doctype": ["in", ["Communication", "HD Ticket"]],
+                "attached_to_name": ["in", communications + ticket_ids],
             },
             pluck="name",
         )
@@ -2263,8 +2547,812 @@ class TestHDTicket(IntegrationTestCase):
         self.assertEqual(ticket.sla, SLA_PRIORITY_NAME)
         self.assertFalse(ticket.total_hold_time)
 
+    def test_permission_check_answers_for_passed_user_not_session(self):
+        """A check made on behalf of another user must use that user's teams.
+
+        Session is an agent on the ticket's team, the checked user is not, so a
+        session-bound lookup would wrongly grant access.
+        """
+        make_team("Team A", members=[agent])
+        make_team("Team B", members=[agent2])
+        frappe.db.set_single_value("HD Settings", "restrict_tickets_by_agent_group", 1)
+        self.addCleanup(
+            frappe.db.set_single_value,
+            "HD Settings",
+            "restrict_tickets_by_agent_group",
+            0,
+        )
+
+        ticket = make_ticket(agent_group="Team B", raised_by=non_agent)
+
+        frappe.set_user(agent2)
+        self.assertTrue(has_permission(ticket, user=agent2))
+        self.assertFalse(has_permission(ticket, user=agent))
+        self.assertNotIn("Team B", permission_query(agent))
+
+    def test_only_managers_can_delete_a_ticket(self):
+        manager = make_agent("ticket_manager@test.com", first_name="Ticket Manager")
+        frappe.get_doc("User", manager).add_roles("Agent Manager")
+        ticket = make_ticket(raised_by=non_agent)
+
+        frappe.set_user(agent)
+        with self.assertRaises(frappe.PermissionError):
+            frappe.delete_doc("HD Ticket", ticket.name)
+
+        frappe.set_user(manager)
+        frappe.delete_doc("HD Ticket", ticket.name)
+        self.assertFalse(frappe.db.exists("HD Ticket", ticket.name))
+        frappe.set_user("Administrator")
+
+    def test_only_agents_can_comment_on_a_ticket(self):
+        contact = create_contact("Commenter", "commenter@test.com")
+        customer = contact.get("user")
+        ticket = make_ticket(raised_by=customer, via_customer_portal=1)
+
+        frappe.set_user(customer)
+        self.assertTrue(frappe.has_permission("HD Ticket", "read", doc=ticket.name))
+        with self.assertRaises(frappe.PermissionError):
+            desk_add_comment("HD Ticket", ticket.name, "sneaky", customer, "Commenter")
+
+        frappe.set_user(agent)
+        comment = desk_add_comment("HD Ticket", ticket.name, "internal", agent, "agent")
+        self.assertTrue(frappe.db.exists("Comment", comment.name))
+
+        # system comments carry no author intent, so the session user is irrelevant
+        frappe.set_user(customer)
+        assigned = frappe.get_doc("HD Ticket", ticket.name).add_comment(
+            "Assigned", "assigned to agent"
+        )
+        self.assertTrue(frappe.db.exists("Comment", assigned.name))
+        frappe.set_user("Administrator")
+
     def tearDown(self):
         frappe.set_user("Administrator")
         remove_holidays()
         frappe.db.set_single_value("HD Settings", "default_ticket_status", "Open")
         frappe.delete_doc("HD Ticket Status", "New", force=True)
+
+
+class TestEmailRecipientsStayWithAgents(IntegrationTestCase):
+    def setUp(self) -> None:
+        self.customer = create_contact(
+            "Recipients Customer", "recipients-customer@example.com"
+        )["user"]
+        self.ticket = make_ticket(raised_by=self.customer)
+        frappe.get_doc(
+            {
+                "doctype": "Communication",
+                "communication_type": "Communication",
+                "sent_or_received": "Sent",
+                "subject": "Re: ticket",
+                "content": "Our reply",
+                "sender": "agent@test.com",
+                "recipients": self.customer,
+                "cc": "colleague@example.com",
+                "bcc": "boss@example.com",
+                "reference_doctype": "HD Ticket",
+                "reference_name": self.ticket.name,
+            }
+        ).insert(ignore_permissions=True)
+
+    def tearDown(self) -> None:
+        frappe.set_user("Administrator")
+
+    def timeline_emails(self) -> list[dict]:
+        result = frappe.call(
+            "helpdesk.overrides.activity.get_activity_timeline",
+            doctype="HD Ticket",
+            name=self.ticket.name,
+            visible_types=["email"],
+        )
+        return [row["data"] for row in result["activities"]]
+
+    def test_a_customer_gets_no_recipients(self) -> None:
+        frappe.set_user(self.customer)
+        for email in self.timeline_emails():
+            self.assertFalse({"to", "cc", "bcc"} & email.keys())
+        for communication in get_communications(self.ticket.name):
+            self.assertFalse({"recipients", "cc", "bcc"} & communication.keys())
+
+    def test_an_agent_still_gets_them(self) -> None:
+        frappe.set_user(make_agent("recipients-agent@example.com"))
+        bccs = [email.get("bcc") for email in self.timeline_emails()]
+        self.assertIn("boss@example.com", bccs)
+
+    def test_a_customer_cannot_load_the_desk_form(self) -> None:
+        from helpdesk.overrides import activity
+
+        frappe.set_user(self.customer)
+        loaders = (
+            lambda: activity.getdoc("HD Ticket", self.ticket.name),
+            lambda: activity.get_docinfo(doctype="HD Ticket", name=self.ticket.name),
+            lambda: activity.get_communications("HD Ticket", self.ticket.name),
+        )
+        for load in loaders:
+            with self.assertRaises(frappe.PermissionError):
+                load()
+
+
+class TestCustomerPing(IntegrationTestCase):
+    def save_and_count_pings(self, **values) -> int:
+        ticket = make_ticket()
+        ticket.reload()
+        ticket.update(values)
+        with patch.object(type(ticket), "notify_customers") as notify:
+            ticket.save(ignore_permissions=True)
+        return notify.call_count
+
+    def test_an_internal_field_change_sends_no_ping(self) -> None:
+        self.assertEqual(self.save_and_count_pings(resolution_details="notes"), 0)
+
+    def test_a_visible_field_change_pings(self) -> None:
+        self.assertEqual(self.save_and_count_pings(subject="New subject"), 1)
+
+    def test_a_second_agent_reply_pings(self) -> None:
+        # The first reply also sets first_responded_on; the second sets only internal fields
+        ticket = make_ticket()
+        reply = {
+            "doctype": "Communication",
+            "communication_type": "Communication",
+            "sent_or_received": "Sent",
+            "content": "A reply",
+            "reference_doctype": "HD Ticket",
+            "reference_name": ticket.name,
+        }
+        frappe.get_doc(reply).insert(ignore_permissions=True)
+        with patch.object(type(ticket), "notify_customers") as notify:
+            frappe.get_doc(reply).insert(ignore_permissions=True)
+        self.assertTrue(notify.called)
+
+
+class TestTicketTimelineChanges(IntegrationTestCase):
+    def tearDown(self) -> None:
+        frappe.set_user("Administrator")
+
+    def close(self, raised_by: str = "Administrator", **values):
+        ticket = make_ticket(raised_by=raised_by)
+        # Assignment rules write to it on insert.
+        ticket.reload()
+        ticket.update({"status": "Closed", **values})
+        # tests skip Version by default
+        ticket.save(ignore_permissions=True, ignore_version=False)
+        return ticket
+
+    def test_lists_a_status_change_with_its_author(self) -> None:
+        ticket = self.close()
+
+        [change] = get_timeline_changes(ticket.name)
+
+        self.assertEqual(change["field"], "status")
+        self.assertEqual((change["from"], change["to"]), ("Open", "Closed"))
+        self.assertEqual(change["by"]["name"], "Administrator")
+        self.assertTrue(change["on"])
+
+    def test_the_ticket_s_own_customer_can_read_them(self) -> None:
+        customer = create_contact("Timeline Customer", "timeline.customer@example.com")
+        ticket = self.close(raised_by=customer["user"])
+        frappe.set_user(customer["user"])
+
+        [change] = get_timeline_changes(ticket.name)
+
+        self.assertEqual(change["to"], "Closed")
+        self.assertEqual(change["by"]["name"], "Administrator")
+
+    def test_leaves_the_rating_out(self) -> None:
+        ticket = self.close(feedback_rating=0.8)
+
+        fields = [change["field"] for change in get_timeline_changes(ticket.name)]
+
+        self.assertEqual(fields, ["status"])
+
+    def test_a_stranger_cannot_read_them(self) -> None:
+        ticket = make_ticket(raised_by="Administrator")
+        frappe.set_user(non_agent)
+
+        self.assertRaises(frappe.PermissionError, get_timeline_changes, ticket.name)
+
+
+PERMS_CUSTOMER = "perms.customer@example.com"
+PERMS_OTHER_CUSTOMER = "perms.other@example.com"
+PERMS_AGENT = "perms.agent@example.com"
+
+
+class TestHDTicketFieldPermissions(IntegrationTestCase):
+    """Customers may only fill customer-facing fields, and only while creating.
+    A later edit to any field raises PermissionError, whatever its permlevel."""
+
+    def setUp(self):
+        frappe.set_user("Administrator")
+        create_contact("Perms Customer", PERMS_CUSTOMER)
+        create_contact("Perms Other", PERMS_OTHER_CUSTOMER)
+        frappe.get_doc(
+            {"doctype": "User", "first_name": "Perms Agent", "email": PERMS_AGENT}
+        ).insert(ignore_if_duplicate=True)
+        frappe.get_doc(
+            {"doctype": "HD Agent", "user": PERMS_AGENT, "agent_name": "Perms Agent"}
+        ).insert(ignore_if_duplicate=True)
+        self.original_default_fields = default_template_rows()
+        if self.original_default_fields:
+            # tests assume a clean default template
+            set_default_template_rows([])
+
+    def tearDown(self):
+        frappe.set_user("Administrator")
+        set_default_template_rows(self.original_default_fields)
+
+    def test_customer_cannot_edit_ticket_after_creation(self):
+        """Level-0 fields stay writable to raise a ticket; freezing them is the guard's job."""
+        ticket = get_customer_ticket(PERMS_CUSTOMER)
+        original_subject = ticket.subject
+        ticket.subject = "Updated by customer"
+        ticket.description = "Updated description"
+        with self.assertRaises(frappe.PermissionError):
+            ticket.save()
+        ticket.reload()
+        self.assertEqual(ticket.subject, original_subject)
+
+    def test_customer_edit_to_a_protected_field_raises(self):
+        """Frappe resets fields a user cannot write before any hook runs, so
+        without the guard a faulty portal script would fail silently."""
+        ticket = make_ticket(raised_by=PERMS_CUSTOMER)
+        frappe.set_user(PERMS_CUSTOMER)
+        for fieldname, value in (
+            ("priority", other_priority(ticket.priority)),
+            ("resolution_details", "set by a portal script"),
+        ):
+            with self.assertRaisesRegex(
+                frappe.PermissionError, "You do not have permission to change"
+            ):
+                client_set_value("HD Ticket", ticket.name, fieldname, value)
+            self.assertEqual(
+                frappe.db.get_value("HD Ticket", ticket.name, fieldname),
+                ticket.get(fieldname),
+            )
+
+    def test_customer_can_edit_a_field_the_template_opens(self):
+        """Editable after creation is ticked unless the admin unticks it."""
+        set_default_template_rows([{"fieldname": "priority", "visible_to": "Everyone"}])
+        ticket = make_ticket(raised_by=PERMS_CUSTOMER)
+        new_priority = other_priority(ticket.priority)
+        frappe.set_user(PERMS_CUSTOMER)
+        client_set_value("HD Ticket", ticket.name, "priority", new_priority)
+        self.assertEqual(
+            frappe.db.get_value("HD Ticket", ticket.name, "priority"), new_priority
+        )
+
+    def test_editable_after_creation_is_ignored_on_an_agent_only_row(self):
+        set_default_template_rows(
+            [
+                {
+                    "fieldname": "priority",
+                    "visible_to": "Agents",
+                    "editable_after_creation": 1,
+                }
+            ]
+        )
+        ticket = make_ticket(raised_by=PERMS_CUSTOMER)
+        frappe.set_user(PERMS_CUSTOMER)
+        with self.assertRaises(frappe.PermissionError):
+            client_set_value(
+                "HD Ticket", ticket.name, "priority", other_priority(ticket.priority)
+            )
+
+    def test_customer_resaving_an_unchanged_ticket_passes(self):
+        """A customer is never sent the fields it cannot read, so a whole-document
+        save carries them blank; that is not an edit."""
+        ticket = make_ticket(raised_by=PERMS_CUSTOMER)
+        frappe.db.set_value(
+            "HD Ticket", ticket.name, "resolution_details", "agent notes"
+        )
+        frappe.set_user(PERMS_CUSTOMER)
+        seen = client_get("HD Ticket", ticket.name)
+        self.assertFalse(seen.get("resolution_details"))
+        client_save(seen)
+        self.assertEqual(
+            frappe.db.get_value("HD Ticket", ticket.name, "resolution_details"),
+            "agent notes",
+        )
+
+    def test_customer_can_close_own_ticket_but_not_resolve_it(self):
+        """Closing also flips status_category via fetch_from; the guard must allow both."""
+        ticket = make_ticket(raised_by=PERMS_CUSTOMER)
+        frappe.set_user(PERMS_CUSTOMER)
+        with self.assertRaises(frappe.PermissionError):
+            client_set_value("HD Ticket", ticket.name, "status", "Resolved")
+        client_set_value("HD Ticket", ticket.name, "status", "Closed")
+        self.assertEqual(
+            frappe.db.get_value("HD Ticket", ticket.name, "status"), "Closed"
+        )
+
+    def test_rules_and_templates_read_the_whole_ticket(self):
+        """Assignment rules and mail templates evaluate as_dict as the customer."""
+        frappe.set_user(PERMS_CUSTOMER)
+        ticket = frappe.get_doc(get_ticket_obj()).insert()
+        self.assertEqual(ticket.as_dict().get("via_customer_portal"), 1)
+
+    def test_first_communication_fills_a_blank_description(self):
+        """Tickets raised by email or by a split start without one."""
+        ticket = make_ticket(description=None)
+        frappe.get_doc(
+            {
+                "doctype": "Communication",
+                "communication_type": "Communication",
+                "communication_medium": "Email",
+                "sent_or_received": "Received",
+                "reference_doctype": "HD Ticket",
+                "reference_name": ticket.name,
+                "subject": ticket.subject,
+                "content": "my printer is broken, see https://example.com<script>x</script>",
+            }
+        ).insert(ignore_permissions=True)
+        description = frappe.db.get_value("HD Ticket", ticket.name, "description")
+        self.assertIn("my printer is broken", description)
+        self.assertNotIn("<script>", description)
+
+    def test_description_is_set_only_once(self):
+        ticket = make_ticket(raised_by=PERMS_CUSTOMER)
+        ticket.reload()
+        ticket.description = "Rewritten by an agent"
+        with self.assertRaises(frappe.CannotChangeConstantError):
+            ticket.save()
+
+    def test_customer_cannot_tamper_via_run_doc_method(self):
+        """run_doc_method builds the doc from the caller's payload and the save skips
+        permissions, so only a check inside validate stops the tampered value."""
+        ticket = make_ticket(raised_by=PERMS_CUSTOMER)
+        # agreement_status is a poor probe: the SLA engine recomputes it on every save
+        before = frappe.db.get_value("HD Ticket", ticket.name, "resolution_details")
+
+        frappe.set_user(PERMS_CUSTOMER)
+        payload = frappe.get_doc("HD Ticket", ticket.name).as_dict()
+        payload["resolution_details"] = "injected by customer"
+        tampered = frappe.get_doc(payload)
+
+        with self.assertRaises(frappe.PermissionError):
+            tampered.create_communication_via_contact("Tampering")
+
+        self.assertEqual(
+            frappe.db.get_value("HD Ticket", ticket.name, "resolution_details"), before
+        )
+
+    def test_agent_can_write_agent_fields(self):
+        ticket = make_ticket(raised_by=PERMS_CUSTOMER)
+        frappe.set_user(PERMS_AGENT)
+        ticket = frappe.get_doc("HD Ticket", ticket.name)
+        new_priority = other_priority(ticket.priority)
+        ticket.priority = new_priority
+        ticket.save()
+        ticket.reload()
+        self.assertEqual(ticket.priority, new_priority)
+
+    def test_customer_cannot_spoof_fields_on_insert(self):
+        other_contact = frappe.db.get_value(
+            "Contact", {"email_id": PERMS_OTHER_CUSTOMER}
+        )
+        frappe.set_user(PERMS_CUSTOMER)
+        baseline = frappe.get_doc(get_ticket_obj()).insert()
+        self.assertEqual(baseline.raised_by, PERMS_CUSTOMER)
+        # the server-set portal flag survives the permission reset
+        self.assertEqual(baseline.via_customer_portal, 1)
+        self.assertTrue(baseline.key)
+
+        spoofed = frappe.get_doc(
+            {
+                **get_ticket_obj(),
+                "raised_by": PERMS_OTHER_CUSTOMER,
+                "contact": other_contact,
+                "priority": other_priority(baseline.priority),
+            }
+        ).insert()
+        self.assertEqual(spoofed.raised_by, PERMS_CUSTOMER)
+        self.assertEqual(spoofed.priority, baseline.priority)
+        self.assertNotEqual(spoofed.contact, other_contact)
+
+    def test_custom_field_permlevel_governs_customer_access(self):
+        """At 8 a customer's value is dropped; at 7 it is fillable at creation, then frozen."""
+        from frappe.custom.doctype.custom_field.custom_field import create_custom_field
+
+        fieldname = "custom_perms_admin_set"
+        create_custom_field(
+            "HD Ticket",
+            {
+                "fieldname": fieldname,
+                "label": "Perms Admin Set",
+                "fieldtype": "Data",
+                "permlevel": 8,
+            },
+        )
+        try:
+            set_default_template_rows(
+                [{"fieldname": fieldname, "visible_to": "Agents"}]
+            )
+            frappe.set_user(PERMS_CUSTOMER)
+            hidden = frappe.get_doc(
+                {**get_ticket_obj(), fieldname: "sneaky value"}
+            ).insert()
+            self.assertFalse(hidden.get(fieldname))
+
+            # an admin lowers it to the customer-visible level in Customize Form
+            frappe.set_user("Administrator")
+            set_custom_field_permlevel(fieldname, 7)
+            set_default_template_rows(
+                [
+                    {
+                        "fieldname": fieldname,
+                        "visible_to": "Everyone",
+                        "editable_after_creation": 0,
+                    }
+                ]
+            )
+            frappe.set_user(PERMS_CUSTOMER)
+            visible = frappe.get_doc(
+                {**get_ticket_obj(), fieldname: "customer value"}
+            ).insert()
+            self.assertEqual(visible.get(fieldname), "customer value")
+
+            # fillable only while creating: a later edit is refused
+            visible.reload()
+            visible.set(fieldname, "changed later")
+            with self.assertRaises(frappe.PermissionError):
+                visible.save()
+            visible.reload()
+            self.assertEqual(visible.get(fieldname), "customer value")
+        finally:
+            frappe.set_user("Administrator")
+            frappe.delete_doc(
+                "Custom Field",
+                frappe.db.get_value(
+                    "Custom Field", {"dt": "HD Ticket", "fieldname": fieldname}
+                ),
+                force=True,
+            )
+            frappe.clear_cache(doctype="HD Ticket")
+
+    def test_non_default_template_cannot_show_internal_custom_field(self):
+        """A sidecar template cannot show a field the site keeps internal."""
+        from frappe.custom.doctype.custom_field.custom_field import create_custom_field
+
+        fieldname = "custom_perms_sidecar_internal"
+        create_custom_field(
+            "HD Ticket",
+            {
+                "fieldname": fieldname,
+                "label": "Perms Sidecar Internal",
+                "fieldtype": "Data",
+                "permlevel": 8,
+            },
+        )
+        frappe.clear_cache(doctype="HD Ticket")
+        try:
+            with self.assertRaises(frappe.ValidationError):
+                make_template(
+                    "Perms Sidecar Show",
+                    [{"fieldname": fieldname, "visible_to": "Everyone"}],
+                )
+            self.assertEqual(get_custom_field_permlevel(fieldname), 8)
+        finally:
+            frappe.set_user("Administrator")
+            frappe.delete_doc(
+                "HD Ticket Template",
+                "Perms Sidecar Show",
+                force=True,
+                ignore_missing=True,
+            )
+            frappe.delete_doc(
+                "Custom Field",
+                frappe.db.get_value(
+                    "Custom Field", {"dt": "HD Ticket", "fieldname": fieldname}
+                ),
+                force=True,
+            )
+            frappe.clear_cache(doctype="HD Ticket")
+
+    def test_customer_cannot_set_agent_side_status(self):
+        """Replied means an agent answered; a customer may only close."""
+        ticket = make_ticket(raised_by=PERMS_CUSTOMER)
+        frappe.set_user(PERMS_CUSTOMER)
+        with self.assertRaises(frappe.PermissionError):
+            client_set_value("HD Ticket", ticket.name, "status", "Replied")
+
+    def test_customer_cannot_rewrite_feedback_once_rated(self):
+        """Held only for portal-raised tickets before; agent-raised ones were revisable."""
+        option, other = frappe.get_all(
+            "HD Ticket Feedback Option", fields=["name"], limit=2
+        )
+        ticket = make_ticket(raised_by=PERMS_CUSTOMER)
+        frappe.db.set_value(
+            "HD Ticket",
+            ticket.name,
+            {
+                "status": "Closed",
+                "feedback": option.name,
+                "via_customer_portal": 0,
+            },
+        )
+        frappe.set_user(PERMS_CUSTOMER)
+        with self.assertRaises(frappe.PermissionError):
+            client_set_value("HD Ticket", ticket.name, "feedback", other.name)
+
+    def test_customer_cannot_rerate_a_resolved_ticket(self):
+        option, other = frappe.get_all(
+            "HD Ticket Feedback Option", fields=["name"], limit=2
+        )
+        ticket = make_ticket(raised_by=PERMS_CUSTOMER)
+        frappe.db.set_value(
+            "HD Ticket", ticket.name, {"status": "Resolved", "feedback": option.name}
+        )
+        frappe.set_user(PERMS_CUSTOMER)
+        with self.assertRaises(frappe.PermissionError):
+            client_set_value("HD Ticket", ticket.name, "feedback", other.name)
+
+    def test_customer_cannot_read_form_scripts(self):
+        """Agent form scripts carry internal URLs and method names."""
+        frappe.set_user(PERMS_CUSTOMER)
+        with self.assertRaises(frappe.PermissionError):
+            frappe.get_list("HD Form Script", fields=["name", "script"])
+
+    def test_portal_ticket_page_never_serves_agent_scripts(self):
+        """The portal page decides the audience, not the reader's role."""
+        for name, portal, body in (
+            ("Perms Portal Script", 1, "PORTAL"),
+            ("Perms Agent Script", 0, "AGENT"),
+        ):
+            frappe.delete_doc("HD Form Script", name, force=True, ignore_missing=True)
+            frappe.get_doc(
+                {
+                    "doctype": "HD Form Script",
+                    "name": name,
+                    "dt": "HD Ticket",
+                    "apply_to": "Form",
+                    "enabled": 1,
+                    "apply_to_customer_portal": portal,
+                    "script": f"function setupForm() {{ return {{}} }} // {body}",
+                }
+            ).insert()
+        ticket = make_ticket(raised_by=PERMS_CUSTOMER)
+        try:
+            frappe.set_user(PERMS_CUSTOMER)
+            customer_view = get_one(ticket.name)
+            forced = customer_view.get("_form_script")
+            self.assertTrue(any("PORTAL" in s for s in forced))
+            self.assertFalse(any("AGENT" in s for s in forced))
+            # nowhere else either: the nested template payload used to carry the
+            # agent scripts, and checking only the top level is what hid that
+            self.assertNotIn("AGENT", frappe.as_json(customer_view))
+
+            # an agent opening the portal gets the portal's scripts too
+            frappe.set_user(PERMS_AGENT)
+            agent_view = get_one(ticket.name).get("_form_script")
+            self.assertTrue(any("PORTAL" in s for s in agent_view))
+            self.assertFalse(any("AGENT" in s for s in agent_view))
+        finally:
+            frappe.set_user("Administrator")
+            for name in ("Perms Portal Script", "Perms Agent Script"):
+                frappe.delete_doc(
+                    "HD Form Script", name, force=True, ignore_missing=True
+                )
+
+    def test_new_ticket_form_runs_new_page_scripts_for_customers(self):
+        """The form cannot set new page and customer portal together, and Field
+        Dependency sets new page only, so the portal must load these too."""
+        make_form_script(
+            self, "Perms New Page Script", "NEW_PAGE", apply_on_new_page=True
+        )
+        for user in (PERMS_CUSTOMER, PERMS_AGENT):
+            frappe.set_user(user)
+            scripts = get_ticket_form(DEFAULT_TICKET_TEMPLATE)["_form_script"]
+            self.assertTrue(any("NEW_PAGE" in s for s in scripts))
+
+    def test_customer_can_submit_feedback(self):
+        """The portal sends status, feedback and feedback_extra in a single
+        set_value, and the rating is derived here rather than trusted."""
+        option = frappe.get_all(
+            "HD Ticket Feedback Option", fields=["name", "rating"], limit=1
+        )[0]
+        ticket = make_ticket(raised_by=PERMS_CUSTOMER)
+        frappe.set_user(PERMS_CUSTOMER)
+        client_set_value(
+            "HD Ticket",
+            ticket.name,
+            {
+                "status": "Closed",
+                "feedback": option.name,
+                "feedback_extra": "Thanks for the help",
+            },
+        )
+        frappe.set_user("Administrator")
+        saved = frappe.db.get_value(
+            "HD Ticket",
+            ticket.name,
+            ["status", "feedback", "feedback_extra", "feedback_rating"],
+            as_dict=True,
+        )
+        self.assertEqual(saved.status, "Closed")
+        self.assertEqual(saved.feedback, option.name)
+        self.assertEqual(saved.feedback_extra, "Thanks for the help")
+        self.assertEqual(saved.feedback_rating, option.rating)
+
+    def test_customer_cannot_set_own_feedback_rating(self):
+        """feedback_rating is derived from feedback, never accepted raw."""
+        ticket = make_ticket(raised_by=PERMS_CUSTOMER)
+        frappe.set_user(PERMS_CUSTOMER)
+        with self.assertRaises(frappe.PermissionError):
+            client_set_value("HD Ticket", ticket.name, "feedback_rating", 1)
+
+    def test_internal_field_not_exposable_via_template(self):
+        """Marking an internal standard field visible is rejected loudly:
+        `key` authenticates the guest feedback flow."""
+        with self.assertRaises(frappe.ValidationError):
+            set_default_template_rows([{"fieldname": "key", "visible_to": "Everyone"}])
+        self.assertEqual(ticket_field_permlevel("key"), 8)
+        # listing it hidden, for the agent form, stays allowed
+        set_default_template_rows([{"fieldname": "key", "visible_to": "Agents"}])
+        self.assertEqual(ticket_field_permlevel("key"), 8)
+
+    def test_secret_field_never_exposable_via_template(self):
+        """`key` authenticates guest feedback links. Even an admin lowering
+        its level in Customize Form must not make it showable."""
+        frappe.make_property_setter(
+            {
+                "doctype": "HD Ticket",
+                "fieldname": "key",
+                "property": "permlevel",
+                "value": "7",
+                "property_type": "Int",
+            }
+        )
+        frappe.clear_cache(doctype="HD Ticket")
+        try:
+            self.assertEqual(ticket_field_permlevel("key"), 7)
+            with self.assertRaises(frappe.ValidationError):
+                set_default_template_rows(
+                    [{"fieldname": "key", "visible_to": "Everyone"}]
+                )
+        finally:
+            frappe.db.delete(
+                "Property Setter",
+                {
+                    "doc_type": "HD Ticket",
+                    "field_name": "key",
+                    "property": "permlevel",
+                },
+            )
+            frappe.clear_cache(doctype="HD Ticket")
+
+    def test_system_set_field_not_exposable_via_template(self):
+        """Showing sla would offer a picker the server throws away; hidden is fine."""
+        with self.assertRaises(frappe.ValidationError):
+            set_default_template_rows([{"fieldname": "sla", "visible_to": "Everyone"}])
+        set_default_template_rows([{"fieldname": "sla", "visible_to": "Agents"}])
+
+    def test_portal_activity_stamps_last_customer_response(self):
+        frappe.set_user(PERMS_CUSTOMER)
+        ticket = frappe.get_doc(get_ticket_obj()).insert()
+        ticket.reload()
+        self.assertTrue(ticket.last_customer_response)
+
+        frappe.set_user("Administrator")
+        frappe.db.set_value("HD Ticket", ticket.name, "last_customer_response", None)
+        frappe.set_user(PERMS_CUSTOMER)
+        ticket = frappe.get_doc("HD Ticket", ticket.name)
+        ticket.create_communication_via_contact("customer follow-up")
+        self.assertTrue(
+            frappe.db.get_value("HD Ticket", ticket.name, "last_customer_response")
+        )
+
+    def test_visible_field_fillable_only_while_creating(self):
+        """A standard field the default template shows can be filled on the
+        creation form; unticked, an edit afterwards is refused."""
+        set_default_template_rows(
+            [
+                {
+                    "fieldname": "priority",
+                    "visible_to": "Everyone",
+                    "editable_after_creation": 0,
+                }
+            ]
+        )
+        frappe.set_user(PERMS_CUSTOMER)
+        default_priority = frappe.get_doc(get_ticket_obj()).insert().priority
+        chosen = other_priority(default_priority)
+        ticket = frappe.get_doc({**get_ticket_obj(), "priority": chosen}).insert()
+        self.assertEqual(ticket.priority, chosen)
+
+        ticket.reload()
+        ticket.priority = other_priority(chosen)
+        with self.assertRaises(frappe.PermissionError):
+            ticket.save()
+        ticket.reload()
+        self.assertEqual(ticket.priority, chosen)
+
+    def test_response_stamp_not_fillable_at_creation(self):
+        """`first_responded_on` is server-stamped, so a customer-supplied
+        value at creation is dropped."""
+        frappe.set_user(PERMS_CUSTOMER)
+        ticket = frappe.get_doc(
+            {**get_ticket_obj(), "first_responded_on": now_datetime()}
+        ).insert()
+        self.assertFalse(ticket.first_responded_on)
+
+    def test_site_permlevel_not_fillable_at_creation(self):
+        """Only levels 0 and 7 are creation-fillable; a field moved
+        to a site-owned level (1-6) after the template save is not."""
+        from frappe.custom.doctype.property_setter.property_setter import (
+            make_property_setter,
+        )
+
+        set_default_template_rows([{"fieldname": "priority", "visible_to": "Everyone"}])
+        make_property_setter("HD Ticket", "priority", "permlevel", 3, "Int")
+        frappe.clear_cache(doctype="HD Ticket")
+        try:
+            frappe.set_user(PERMS_CUSTOMER)
+            baseline_priority = frappe.get_doc(get_ticket_obj()).insert().priority
+            ticket = frappe.get_doc(
+                {**get_ticket_obj(), "priority": other_priority(baseline_priority)}
+            ).insert()
+            self.assertEqual(ticket.priority, baseline_priority)
+        finally:
+            frappe.set_user("Administrator")
+            frappe.db.delete(
+                "Property Setter",
+                {
+                    "doc_type": "HD Ticket",
+                    "field_name": "priority",
+                    "property": "permlevel",
+                },
+            )
+            frappe.clear_cache(doctype="HD Ticket")
+
+    def test_customer_cannot_read_internal_fields(self):
+        internal = ("agreement_status", "last_agent_response", "key")
+        # the portal SLA card needs sla to render at all: it gates on it
+        display = ("priority", "raised_by", "response_by", "resolution_by", "sla")
+
+        frappe.set_user(PERMS_CUSTOMER)
+        ticket = frappe.get_doc(get_ticket_obj()).insert()
+        # stripped fields are gone entirely, name included
+        data = get_one(ticket.name)
+        for field in internal:
+            self.assertNotIn(field, data)
+        for field in display:
+            self.assertTrue(data.get(field))
+
+        # framework read paths strip permlevel-8 values for customers
+        stripped = client_get("HD Ticket", name=ticket.name)
+        self.assertFalse(stripped.get("agreement_status"))
+        self.assertTrue(stripped.get("sla"))
+        self.assertTrue(stripped.get("response_by"))
+
+        # the creation response carries what the customer may read, nothing internal
+        created = new(get_ticket_obj())
+        self.assertEqual(created["raised_by"], PERMS_CUSTOMER)
+        for field in internal:
+            self.assertNotIn(field, created)
+
+        frappe.set_user(PERMS_AGENT)
+        self.assertTrue(get_one(ticket.name).get("agreement_status"))
+
+    def test_sla_output_not_fillable_at_creation(self):
+        """SLA outputs are readable, but the engine owns their values and recomputes them."""
+        supplied = "2000-01-01 00:00:00"
+        frappe.set_user(PERMS_CUSTOMER)
+        ticket = frappe.get_doc({**get_ticket_obj(), "response_by": supplied}).insert()
+        self.assertTrue(ticket.response_by)
+        self.assertNotEqual(str(ticket.response_by), supplied)
+
+    def test_customer_spoof_rejected_without_auto_set_customer(self):
+        """The contact-customer link check must not depend on the auto-set toggle."""
+        create_customer("Perms Unlinked Corp")
+        setting = "auto_set_customer_from_contact"
+        original = frappe.db.get_single_value("HD Settings", setting)
+        frappe.db.set_single_value("HD Settings", setting, 0)
+        try:
+            frappe.set_user(PERMS_CUSTOMER)
+            with self.assertRaises(frappe.ValidationError):
+                frappe.get_doc(
+                    {**get_ticket_obj(), "customer": "Perms Unlinked Corp"}
+                ).insert()
+        finally:
+            frappe.set_user("Administrator")
+            frappe.db.set_single_value("HD Settings", setting, original)
+            frappe.delete_doc("HD Customer", "Perms Unlinked Corp", force=True)

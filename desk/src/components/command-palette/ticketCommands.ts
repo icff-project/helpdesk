@@ -1,5 +1,5 @@
 import { useNotifyTicketUpdate } from "@/composables/realtime";
-import { useTicket } from "@/composables/useTicket";
+import { reloadTicketFeed, useTicket } from "@/composables/useTicket";
 import {
   canNavigateTickets,
   getNextTicket,
@@ -14,19 +14,19 @@ import {
 } from "@/pages/ticket/modalStates";
 import { useAgentStore } from "@/stores/agent";
 import { getMeta } from "@/stores/meta";
-import { __ } from "@/translation";
 import { capture } from "@/telemetry";
-import { copyToClipboard } from "@/utils";
-import { call, createListResource, createResource, toast } from "frappe-ui";
+import { __ } from "@/translation";
+import { copyToClipboard } from "@helpdesk/shared/utils";
+import { createListResource, createResource, toast } from "frappe-ui";
 import { priorityOptions, statusOptions } from "./optionCommands";
-import { savedReplyCommands } from "./savedReplyCommands";
-import { tagChildren } from "./tagCommands";
 import {
   CONTEXT_WEIGHT,
   FLAT_OPTION_WEIGHT,
   GROUP,
   type Command,
 } from "./paletteTypes";
+import { savedReplyCommands } from "./savedReplyCommands";
+import { tagChildren } from "./tagCommands";
 
 // Same icons as the composer buttons these rows press.
 import { CommentIcon, EmailIcon } from "@/components/icons/";
@@ -86,7 +86,7 @@ export function ticketCommands(ticketId: string): Command[] {
       weight: CONTEXT_WEIGHT,
       icon: LucideUsers,
       hint: "Shift+T",
-      keywords: "group agent_group",
+      keywords: "group agent_group escalation escalate",
       children: () => teamChildren(ticketId),
     },
     {
@@ -340,7 +340,7 @@ function fieldLabel(fieldname: string): string {
 function updateTicket(ticketId: string, changes: Record<string, string>): void {
   const [field, value] = Object.entries(changes)[0] ?? [];
   if (!field || value === undefined) return;
-  const { ticket, activities } = useTicket(ticketId);
+  const { ticket } = useTicket(ticketId);
   const current = ticket.doc as unknown as Record<string, unknown> | undefined;
   // The drill-down already ticks the current value, so picking it again just
   // closes quietly.
@@ -348,16 +348,16 @@ function updateTicket(ticketId: string, changes: Record<string, string>): void {
   // Same order as the details tab: tell co-viewers, then write.
   useNotifyTicketUpdate(ticketId).notifyTicketUpdate(fieldLabel(field), value);
   ticket.setValue.submit(changes, {
-    onSuccess: () => activities.reload(),
+    onSuccess: () => reloadTicketFeed(ticketId),
   });
 }
 
 const addAssignee = createResource({ url: "frappe.desk.form.assign_to.add" });
 
 /** Adds without dropping existing assignees; unassigning stays with the AssignTo
- * widget. Mirrors the popover's activity log so both surfaces leave one trail. */
+ * widget. */
 async function assignTicket(ticketId: string, agent: string): Promise<void> {
-  const { assignees, activities } = useTicket(ticketId);
+  const { assignees } = useTicket(ticketId);
   if (assignedNames(ticketId).includes(agent)) {
     toast.success(__("Already assigned to {0}", agent));
     return;
@@ -371,25 +371,10 @@ async function assignTicket(ticketId: string, agent: string): Promise<void> {
     capture("ticket_assigned", {
       data: { doctype: "HD Ticket", source: "command_palette" },
     });
-    await logAssignment(ticketId, agent);
     toast.success(__("Assignees updated successfully."));
     assignees.reload();
-    activities.reload();
+    reloadTicketFeed(ticketId);
   } catch {
     toast.error(__("Failed to update Assignees."));
   }
 }
-
-function logAssignment(ticketId: string, agent: string): Promise<unknown> {
-  return call("frappe.client.insert", {
-    doc: {
-      doctype: "HD Ticket Activity",
-      ticket: ticketId,
-      action: `assigned ${agent}`,
-    },
-  });
-}
-
-// ponytail: "Delete ticket" stays out — $dialog is unreachable from module
-// scope and the ticket header offers it. Wire up if frappe-ui grows a confirm helper.
-

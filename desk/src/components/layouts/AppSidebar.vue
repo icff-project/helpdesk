@@ -1,7 +1,7 @@
 <template>
   <Sidebar
     v-model:collapsed="collapsed"
-    :disable-collapse="mobile"
+    :collapsible="!mobile"
     class="border-e border-outline-gray-1"
     :class="{ '!bg-surface-base': mobile }"
   >
@@ -44,8 +44,10 @@
                 >
                   <component :is="item.icon" class="size-4" />
                   <span
-                    v-if="item.key === 'notifications' && item.badge"
-                    class="absolute -right-0.5 -top-0.5 size-1.5 rounded-full bg-surface-blue-5"
+                    v-if="
+                      isCollapsed && item.key === 'notifications' && item.badge
+                    "
+                    class="absolute -right-0.5 -top-0.5 size-1.5 rounded-full bg-surface-gray-9"
                   />
                 </span>
               </template>
@@ -74,7 +76,7 @@
                     <Button
                       variant="ghost"
                       icon="lucide-more-horizontal"
-                      class="me-1 !size-6 rounded !text-ink-gray-7"
+                      class="me-1 !size-6 rounded-4 !text-ink-gray-7"
                       :class="
                         open
                           ? 'opacity-100'
@@ -96,7 +98,7 @@
       </div>
     </div>
   </Sidebar>
-  <CommandPalette v-if="!mobile && isPaletteAvailable" />
+  <CommandPalette v-if="!mobile" />
   <ViewModal
     v-if="viewDialogConfig.show"
     v-model="viewDialogConfig"
@@ -106,10 +108,7 @@
 
 <script setup lang="ts">
 import CommandPalette from "@/components/command-palette/CommandPalette.vue";
-import {
-  isPaletteAvailable,
-  openPalette,
-} from "@/components/command-palette/useCommandPalette";
+import { openPalette } from "@/components/command-palette/useCommandPalette";
 import UserMenu from "@/components/UserMenu.vue";
 import ViewModal from "@/components/ViewModal.vue";
 import { useDevice } from "@/composables";
@@ -118,7 +117,7 @@ import { useNotificationStore } from "@/stores/notification";
 import { useSidebarStore } from "@/stores/sidebar";
 import { useTelephonyStore } from "@/stores/telephony";
 import { __ } from "@/translation";
-import { getIcon, isCustomerPortal } from "@/utils";
+import { getIcon } from "@/utils";
 import {
   Badge,
   Button,
@@ -135,10 +134,7 @@ import type { RouteLocationRaw } from "vue-router";
 import { useRoute, useRouter } from "vue-router";
 import LucideBell from "~icons/lucide/bell";
 import LucideSearch from "~icons/lucide/search";
-import {
-  agentPortalSidebarOptions,
-  customerPortalSidebarOptions,
-} from "./layoutSettings";
+import { agentPortalSidebarOptions } from "./layoutSettings";
 
 const props = defineProps<{
   profileSettings: any[];
@@ -168,8 +164,7 @@ const collapsed = computed({
   set: (value) => sidebarStore.toggleExpanded(!value),
 });
 
-// The mobile drawer pins the sidebar open (disable-collapse), so it is never
-// visually collapsed even when the store says so.
+// The mobile drawer is never collapsed.
 const isCollapsed = computed(() => collapsed.value && !props.mobile);
 
 // Expanded/folded state of the collapsible view sections, keyed by label.
@@ -197,10 +192,7 @@ function selectItem(key: string, to: RouteLocationRaw, onSelect?: () => void) {
 }
 
 const navItems = computed(() => {
-  const options = isCustomerPortal.value
-    ? customerPortalSidebarOptions
-    : agentPortalSidebarOptions;
-  return options
+  return agentPortalSidebarOptions
     .filter((item) => isCallingEnabled.value || item.label !== __("Call Logs"))
     .map((option, index) => ({
       label: option.label,
@@ -208,7 +200,7 @@ const navItems = computed(() => {
       isActive: activeItem.value === option.to,
       onClick: () => selectItem(option.to, { name: option.to }),
       // Separate the nav group from the search/notification tools above it.
-      spacedTop: index === 0 && !isCustomerPortal.value,
+      spacedTop: index === 0,
       key: option.label,
     }));
 });
@@ -245,7 +237,6 @@ const notificationItem = computed(() =>
 );
 
 const mainItems = computed(() => {
-  if (isCustomerPortal.value) return navItems.value;
   const top = props.mobile
     ? [notificationItem.value]
     : [searchItem.value, notificationItem.value];
@@ -254,7 +245,7 @@ const mainItems = computed(() => {
 
 const sections = computed(() => {
   const result = [{ label: "", items: mainItems.value, collapsible: false }];
-  if (publicViews.value?.length && !isCustomerPortal.value) {
+  if (publicViews.value?.length) {
     result.push({
       label: __("Public Views"),
       items: parseViews(publicViews.value),

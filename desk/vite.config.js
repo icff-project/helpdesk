@@ -1,3 +1,4 @@
+import frameworkUI from "@framework/ui/vite";
 import vue from "@vitejs/plugin-vue";
 import vueJsx from "@vitejs/plugin-vue-jsx";
 import path from "path";
@@ -41,6 +42,7 @@ export default defineConfig(async ({ mode }) => {
           },
         },
       }),
+      frameworkUI(),
 
       vue(),
       vueJsx(),
@@ -101,6 +103,13 @@ export default defineConfig(async ({ mode }) => {
       alias: {
         "@": path.resolve(__dirname, "src"),
         "tailwind.config.js": path.resolve(__dirname, "tailwind.config.js"),
+        // @framework/ui still imports the `frappe-ui/editor-style.css` subpath,
+        // dropped in frappe-ui 1.0.0-beta.63 (the editor entrypoint pulls its
+        // own stylesheet now). Point it at the real file until frappe drops it.
+        "frappe-ui/editor-style.css": path.resolve(
+          __dirname,
+          "node_modules/frappe-ui/src/molecules/editor/style.css"
+        ),
         // ...localFrappeUIAliases,
       },
       // frappe-ui is served from source (excluded from optimizeDeps) and the
@@ -110,11 +119,22 @@ export default defineConfig(async ({ mode }) => {
       dedupe: [
         // @framework/ui imports from vue/frappe-ui; force a single instance of
         // each so its Combobox shares helpdesk's frappe-ui, not a second copy.
+        // vue-router and dompurify are peers of @framework/ui, so they have
+        // to come from helpdesk's copies
         "vue",
+        "vue-router",
         "frappe-ui",
+        // studio's NewTicketForm imports it from outside desk/
+        "@framework/ui",
+        "dompurify",
         "reka-ui",
         "@tiptap/core",
         "@tiptap/pm",
+        // shared/ imports these from outside desk/
+        "@tiptap/extension-table",
+        "@tiptap/extension-text-align",
+        "@tiptap/extension-text-style",
+        "@tiptap/starter-kit",
         "prosemirror-state",
         "prosemirror-model",
         "prosemirror-transform",
@@ -124,11 +144,12 @@ export default defineConfig(async ({ mode }) => {
         "prosemirror-history",
         "prosemirror-gapcursor",
         "prosemirror-tables",
+        // shared/ imports it from outside desk/
+        "vuedraggable",
       ],
     },
     optimizeDeps: {
       include: [
-        "feather-icons",
         "tailwind.config.js",
         "prosemirror-state",
         "prosemirror-view",
@@ -137,7 +158,7 @@ export default defineConfig(async ({ mode }) => {
         "lowlight",
         "interactjs",
       ],
-      exclude: ["frappe-ui", "@framework/ui"],
+      exclude: ["frappe-ui", "@framework/ui", "@helpdesk/shared"],
     },
   };
   return config;

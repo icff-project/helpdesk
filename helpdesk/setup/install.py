@@ -5,6 +5,9 @@ from frappe.custom.doctype.custom_field.custom_field import create_custom_fields
 from frappe.permissions import add_permission, update_permission_property
 
 from helpdesk.consts import DEFAULT_ARTICLE_CATEGORY, DEFAULT_SLA
+from helpdesk.helpdesk.doctype.hd_customer.hd_customer import CUSTOMER_ROLES
+from helpdesk.helpdesk.doctype.hd_settings.helpers import clear_website_home_page
+from helpdesk.setup.comments import setup_comments_and_notifications
 from helpdesk.setup.default_views import add_default_views
 
 from .default_template import create_default_template
@@ -12,6 +15,11 @@ from .file import create_helpdesk_folder
 from .ticket_feedback import create_ticket_feedback_options
 from .ticket_type import create_fallback_ticket_type, create_ootb_ticket_types
 from .welcome_ticket import create_welcome_ticket
+
+
+def before_uninstall():
+    # The portal's route goes with the app
+    clear_website_home_page()
 
 
 def after_install():
@@ -24,6 +32,7 @@ def after_install():
     add_default_agent_groups()
     update_agent_role_permissions()
     add_agent_manager_permissions()
+    setup_comments_and_notifications()
     setup_customer_role()
     add_default_assignment_rule()
     create_default_template()
@@ -212,8 +221,7 @@ def add_agent_manager_permissions():
 
 
 def setup_customer_role(fresh_install=True):
-    customer_roles = ["HD Customer", "HD Customer Manager"]
-    for role_name in customer_roles:
+    for role_name in CUSTOMER_ROLES:
         if frappe.db.exists("Role", role_name):
             role_doc = frappe.get_doc("Role", role_name)
         else:
@@ -224,10 +232,27 @@ def setup_customer_role(fresh_install=True):
         role_doc.save()
 
     if fresh_install:
-        portal_settings = frappe.get_single("Portal Settings")
-        portal_settings.default_role = "HD Customer"
-        portal_settings.default_portal_home = "/helpdesk"
-        portal_settings.save()
+        set_portal_defaults(overwrite=True)
+        # Single defaults aren't stored on install; the home pages assume it
+        frappe.db.set_single_value("HD Settings", "prefer_knowledge_base", 1)
+
+
+def set_portal_defaults(overwrite=False):
+    """Writes the Single directly: a save fails on stale menu rows."""
+    defaults = {
+        "default_role": "HD Customer",
+        # agents fall back to it; customers get theirs from their role
+        "default_portal_home": "/helpdesk",
+    }
+    if overwrite:
+        to_set = defaults
+    else:
+        current = frappe.db.get_singles_dict("Portal Settings")
+        to_set = {
+            field: value for field, value in defaults.items() if not current.get(field)
+        }
+    if to_set:
+        frappe.db.set_single_value("Portal Settings", to_set)
 
 
 def add_website_settings_permission():
@@ -431,8 +456,10 @@ def add_default_agent_status():
     for status in statuses:
         if not frappe.db.exists("HD Agent Status", status["agent_status"]):
             frappe.get_doc(
-                {"doctype": "HD Agent Status", "enable": 1, **status}
+                {"doctype": "HD Agent Status", "enabled": 1, **status}
             ).insert()
+
+    frappe.db.set_single_value("HD Settings", "default_agent_status", "Active")
 
 
 def add_fts_index():

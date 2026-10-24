@@ -31,14 +31,14 @@ export interface HDTicketStatus extends DocType {
   enabled: 0 | 1;
 }
 
-// Last updated: 2026-06-28 13:51:31.692161
+// Last updated: 2026-10-18 16:20:00.000000
 export interface HDTicket extends DocType {
   /** Subject: Data */
   subject: string;
   /** Raised By (Email): Data */
   raised_by?: string;
   /** Status: Link (HD Ticket Status) */
-  status?: string;
+  status: string;
   /** Priority: Link (HD Ticket Priority) */
   priority?: string;
   /** Ticket Type: Link (HD Ticket Type) */
@@ -91,10 +91,6 @@ export interface HDTicket extends DocType {
   email_account?: string;
   /** Via Customer Portal: Check */
   via_customer_portal: 0 | 1;
-  /** Attachment: Attach */
-  attachment?: any;
-  /** Content Type: Data */
-  content_type?: string;
   /** Feedback (Extra): Long Text */
   feedback_extra?: any;
   /** Feedback (Option): Link (HD Ticket Feedback Option) */
@@ -103,6 +99,14 @@ export interface HDTicket extends DocType {
   feedback_rating?: any;
   /** Summary: Text Editor */
   summary?: string;
+  /** Entry Point: Select */
+  entry_point?: '' | 'Article' | 'Search' | 'Ticket List' | 'Closed Ticket' | 'Direct' | 'External';
+  /** Source Article: Link (HD Article) */
+  source_article?: string;
+  /** Source Search: Data */
+  source_search?: string;
+  /** UTM Source: Data */
+  utm_source?: string;
   /** Ticket Merged: Check */
   is_merged: 0 | 1;
   /** Merged With: Link (HD Ticket) */
@@ -289,7 +293,7 @@ export interface HDServiceLevelAgreement extends DocType {
   default_ticket_status?: string;
 }
 
-// Last updated: 2026-07-27 16:57:56.129699
+// Last updated: 2026-09-28 12:00:00.000000
 export interface HDAgent extends DocType {
   /** User: Link (User) */
   user: string;
@@ -303,6 +307,8 @@ export interface HDAgent extends DocType {
   availability?: string;
   /** Availability Changed On: Datetime */
   availability_changed_on?: string;
+  /** Availability Changed By: Link (User) */
+  availability_changed_by?: string;
 }
 
 // Last updated: 2026-06-02 01:18:56.023594
@@ -315,8 +321,8 @@ export interface HDAgentStatus extends DocType {
   category?: 'Active' | 'Away' | 'Unavailable';
   /** Color: Select */
   color?: 'Black' | 'Gray' | 'Blue' | 'Green' | 'Red' | 'Pink' | 'Orange' | 'Amber' | 'Yellow' | 'Cyan' | 'Teal' | 'Violet' | 'purple';
-  /** Enable: Check */
-  enable: 0 | 1;
+  /** Enabled: Check */
+  enabled: 0 | 1;
 }
 
 // Last updated: 2022-12-22 18:52:50.658355
@@ -325,7 +331,7 @@ export interface HDTeamMember extends ChildDocType {
   user?: string;
 }
 
-// Last updated: 2026-05-11 13:28:58.204342
+// Last updated: 2026-10-14 15:52:16.630884
 export interface HDTeam extends DocType {
   /** Name: Data */
   team_name: string;
@@ -347,7 +353,7 @@ export interface HDCustomerMember extends ChildDocType {
   contact_name: string;
 }
 
-// Last updated: 2026-06-20 15:34:00.998330
+// Last updated: 2026-10-09 12:00:00.000000
 export interface HDCustomer extends DocType {
   /** Image: Attach Image */
   image?: string;
@@ -399,7 +405,7 @@ export interface ContactPhone extends ChildDocType {
   is_primary_mobile_no: 0 | 1;
 }
 
-// Last updated: 2024-03-23 16:01:30.937045
+// Last updated: 2026-07-31 16:01:30.937045
 export interface Contact extends DocType {
   /** First Name: Data */
   first_name?: string;
@@ -410,7 +416,7 @@ export interface Contact extends DocType {
   /** User Id: Link (User) */
   user?: string;
   /** Status: Select */
-  status?: "Passive" | "Open" | "Replied";
+  status?: 'Passive' | 'Open' | 'Replied';
   /** Salutation: Link (Salutation) */
   salutation?: string;
   /** Gender: Link (Gender) */
@@ -451,6 +457,4 @@ export interface Contact extends DocType {
   company_name?: string;
   /** Full Name: Data */
   full_name?: string;
-  /** Timezone: Data (from linked User) */
-  timezone?: string;
 }

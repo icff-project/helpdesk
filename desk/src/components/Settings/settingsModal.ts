@@ -19,7 +19,7 @@ import {
   ERPNextSettingsIcon,
   FieldDependencyIcon,
   PhoneIcon,
-  SlidersIcon
+  SlidersIcon,
 } from "@/components/icons";
 import ERPNextIntegrationSettings from "@/components/erpnext-integration/ERPNextIntegrationSettings.vue";
 import TelephonyPage from "./Telephony/TelephonyPage.vue";
@@ -29,8 +29,12 @@ import SavedReplies from "./SavedReplies/SavedReplies.vue";
 import { Avatar } from "frappe-ui";
 import { useAuthStore } from "@/stores/auth";
 import General from "./General/General.vue";
+import KnowledgeBase from "./KnowledgeBase/KnowledgeBase.vue";
+import PortalPermissions from "./Customers/PortalPermissions.vue";
+import LucideUserCog from "~icons/lucide/user-cog";
+import LucideBookOpen from "~icons/lucide/book-open";
 import SettingsGear from "~icons/lucide/settings";
-import SavedReplyIcon from "../icons/SavedReplyIcon.vue";
+import ZapIcon from "~icons/lucide/zap";
 import ProfilePage from "./Profile/ProfilePage.vue";
 import Preferences from "./Preferences/Preferences.vue";
 
@@ -130,8 +134,24 @@ export const tabs = computed(() => {
         },
         {
           label: __("Saved Replies"),
-          icon: markRaw(SavedReplyIcon),
+          icon: markRaw(ZapIcon),
           component: markRaw(SavedReplies),
+        },
+      ],
+    },
+    {
+      label: __("Customer Portal"),
+      condition: () => auth.isAdmin || auth.isManager,
+      items: [
+        {
+          label: __("Portal Settings"),
+          icon: markRaw(LucideUserCog),
+          component: markRaw(PortalPermissions),
+        },
+        {
+          label: __("Knowledge Base"),
+          icon: markRaw(LucideBookOpen),
+          component: markRaw(KnowledgeBase),
         },
       ],
     },
@@ -177,6 +197,8 @@ type TabName =
   | "Email Accounts"
   | "Email Notifications"
   | "General"
+  | "Knowledge Base"
+  | "Portal Settings"
   | "Agents"
   | "Invite Agents"
   | "Teams"

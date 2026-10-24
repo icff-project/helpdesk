@@ -42,7 +42,7 @@
     <div v-show="showCallPopup" v-bind="$attrs">
       <div
         ref="callPopupHeader"
-        class="fixed z-20 flex w-60 cursor-move select-none flex-col rounded-lg bg-surface-gray-10 p-2 !text-ink-gray-2 shadow-2xl"
+        class="fixed z-20 flex w-60 cursor-move select-none flex-col rounded-6 bg-surface-gray-10 p-2 !text-ink-gray-2 shadow-2xl"
         :style="style"
       >
         <div class="flex flex-row-reverse items-center">
@@ -68,7 +68,7 @@
             :class="callStatus == 'In progress' ? '' : 'pulse'"
           />
           <div class="flex flex-col items-center justify-center gap-1">
-            <div class="text-2xl-medium">
+            <div class="text-xl-medium">
               {{ contact?.full_name ?? "Unknown" }}
             </div>
             <div class="text-sm text-ink-gray-5">
@@ -178,27 +178,32 @@ function makeOutgoingCall(number) {
     });
 }
 
+let agentEmail = "";
+
 function setup(userEmail) {
-  $socket.on("exotel_call", (data) => {
-    callData.value = data;
+  agentEmail = userEmail;
+  $socket.on("exotel_call", onExotelCall);
+}
 
-    callStatus.value = updateStatus(data);
+function onExotelCall(data) {
+  callData.value = data;
 
-    if (!showCallPopup.value && !showSmallCallPopup.value) {
-      if (data.AgentEmail && data.AgentEmail == userEmail) {
-        // Incoming call
-        phoneNumber.value = data.CallFrom || data.From;
-        showCallPopup.value = true;
-      } else {
-        // Outgoing call
-        phoneNumber.value = data.To;
-      }
+  callStatus.value = updateStatus(data);
+
+  if (!showCallPopup.value && !showSmallCallPopup.value) {
+    if (data.AgentEmail && data.AgentEmail == agentEmail) {
+      // Incoming call
+      phoneNumber.value = data.CallFrom || data.From;
+      showCallPopup.value = true;
+    } else {
+      // Outgoing call
+      phoneNumber.value = data.To;
     }
-  });
+  }
 }
 
 onBeforeUnmount(() => {
-  $socket.off("exotel_call");
+  $socket.off("exotel_call", onExotelCall);
 });
 
 function closeCallPopup() {

@@ -14,10 +14,15 @@
         :loading="tagListResource.loading"
         :placeholder="__('Search or create tags')"
         side="left"
-        @update:query="queryText = $event"
+        v-model:query="queryText"
       >
         <template #trigger>
-          <div class="flex min-w-0 flex-1 flex-wrap items-center gap-1.5">
+          <!-- reka turns TagColorPicker's whole wrapper into a trigger, so a
+               click here would open the colour picker as well -->
+          <div
+            class="flex min-w-0 flex-1 flex-wrap items-center gap-1.5"
+            @click.stop
+          >
             <TagChip
               v-for="tag in headTags"
               :key="tag"
@@ -64,7 +69,7 @@
             </Tooltip>
           </div>
         </template>
-        <template #suffix>
+        <template #search-suffix>
           <ShortcutKey v-if="!queryText" keys="G" />
         </template>
         <template #item-prefix="{ item }">
@@ -93,8 +98,8 @@
 // picker and TagColorPicker are closed. `localTags` is the source of truth
 // while it runs, `appliedAtOpen` is the snapshot to diff against, and the close
 // sends one add/remove batch.
-import ShortcutKey from "@/components/ShortcutKey.vue";
-import { useShortcut } from "@/composables/shortcuts";
+import ShortcutKey from "@helpdesk/shared/ShortcutKey.vue";
+import { useShortcut } from "@helpdesk/shared/shortcuts";
 import { colorToken, useTags, type Tag } from "@/composables/useTags";
 import { __ } from "@/translation";
 import { useEventListener } from "@vueuse/core";
@@ -339,7 +344,9 @@ watch(localTags, (next) => {
 watch(tagPickerOpen, (open) => {
   queryText.value = "";
   if (open) {
-    appliedAtOpen.value = [...localTags.value];
+    // mid-session the colour step still owns the batch; rebasing here would
+    // drop whatever was unticked before the create started
+    if (!colorPickerOpen.value) appliedAtOpen.value = [...localTags.value];
     tagListResource.reload();
   } else if (!colorPickerOpen.value) {
     // the create flow hands the session to the colour popover

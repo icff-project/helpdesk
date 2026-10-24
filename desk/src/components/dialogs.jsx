@@ -1,5 +1,6 @@
 import { Dialog, ErrorMessage } from "frappe-ui";
 import { reactive, ref } from "vue";
+import { withLegacyCloseContext } from "@helpdesk/shared/formScripts";
 
 let dialogs = ref([]);
 
@@ -34,6 +35,7 @@ export let Dialogs = {
 
 export function createDialog(dialogOptions) {
   let dialog = reactive(dialogOptions);
+  dialog.actions = withLegacyCloseContext(dialog.actions);
   dialog.key = "dialog-" + dialogs.value.length;
   dialog.show = false;
   setTimeout(() => {

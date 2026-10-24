@@ -1,6 +1,6 @@
 <template>
   <div
-    class="flex h-9 w-full min-w-0 items-center rounded px-2 text-sm text-ink-gray-8 leading-snug"
+    class="flex h-9 w-full min-w-0 items-center rounded-4 px-2 text-sm text-ink-gray-8 leading-snug"
     :class="{ 'bg-surface-gray-2': active }"
   >
     <Avatar
@@ -59,7 +59,7 @@
 </template>
 
 <script setup lang="ts">
-import ShortcutKey from "@/components/ShortcutKey.vue";
+import ShortcutKey from "@helpdesk/shared/ShortcutKey.vue";
 import { useDevice } from "@/composables";
 import { Avatar } from "frappe-ui";
 import { computed } from "vue";

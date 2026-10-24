@@ -5,13 +5,13 @@
 </template>
 
 <script setup lang="ts">
-import { useAuthStore } from "@/stores/auth";
-import { computed, defineAsyncComponent, onBeforeMount } from "vue";
-import { useRouter } from "vue-router";
+import { useAgentStatusStore } from "@/stores/agentStatus";
+import { computed, defineAsyncComponent } from "vue";
 
 import { useScreenSize } from "@/composables/screen";
-const router = useRouter();
-const authStore = useAuthStore();
+// eager: subscribes the availability socket handler and runs the login
+// greeting at boot instead of on first ticket open.
+useAgentStatusStore();
 
 const { isMobileView } = useScreenSize();
 
@@ -27,12 +27,6 @@ const Layout = computed(() => {
     return MobileLayout;
   } else {
     return DesktopLayout;
-  }
-});
-
-onBeforeMount(() => {
-  if (!authStore.hasDeskAccess) {
-    router.replace({ name: "TicketsCustomer" });
   }
 });
 </script>

@@ -1,6 +1,8 @@
 import frappe
+from frappe import _
+from frappe.core.doctype.user.user import get_timezones
 
-from helpdesk.utils import agent_only, get_agent_name, get_agents_team
+from helpdesk.utils import agent_only, get_agent_name, get_agents_team, get_user_contact
 from helpdesk.utils import is_agent as _is_agent
 
 
@@ -35,7 +37,7 @@ def get_user():
         frappe.db.get_value(
             "HD Agent",
             agent_name,
-            ["availability", "availability_changed_on"],
+            ["availability", "availability_changed_on", "availability_changed_by"],
             as_dict=True,
         )
         if agent_name
@@ -73,8 +75,58 @@ def get_user():
         "language": language,
         "availability": availability.get("availability"),
         "availability_changed_on": availability.get("availability_changed_on"),
+        "availability_changed_by": availability.get("availability_changed_by"),
         "persona_captured": persona_captured,
     }
+
+
+@frappe.whitelist(methods=["POST"])
+def update_profile(
+    first_name: str | None = None,
+    last_name: str | None = None,
+    image: str | None = None,
+    language: str | None = None,
+    time_zone: str | None = None,
+) -> None:
+    user = frappe.get_doc("User", frappe.session.user)
+    if first_name is not None:
+        user.first_name = first_name
+    if last_name is not None:
+        user.last_name = last_name
+    validate_uploaded_image(image)
+    if image is not None:
+        user.user_image = image or None
+    if language:
+        user.language = language
+    if time_zone:
+        # Autocomplete field: unvalidated, and a bad zone breaks every date
+        if time_zone not in get_timezones()["timezones"]:
+            frappe.throw(_("Unknown time zone: {0}").format(time_zone))
+        user.time_zone = time_zone
+    user.save(ignore_permissions=True)
+    _sync_contact(user)
+
+
+def validate_uploaded_image(image: str | None) -> None:
+    if image and not image.startswith("/files/"):
+        frappe.throw(_("Please upload the picture rather than linking to it"))
+
+
+def _sync_contact(user) -> None:
+    # Frappe syncs Contact after commit, too late for the client reload.
+    contact_name = get_user_contact(user.name)
+    if not contact_name:
+        return
+    # Locked: races the User's own after-commit Contact save.
+    contact = frappe.get_doc("Contact", contact_name, for_update=True)
+    contact.update(
+        {
+            "first_name": user.first_name,
+            "last_name": user.last_name,
+            "image": user.user_image,
+        }
+    )
+    contact.save(ignore_permissions=True)
 
 
 @frappe.whitelist()
@@ -90,21 +142,16 @@ def get_current_user_email_info():
         filters={"parent": user},
         fields=["email_account", "email_id"],
     )
-    outgoing_account_names = frappe.db.get_all(
-        "Email Account",
-        filters={"enable_outgoing": 1},
-        pluck="name",
-    )
-
-    outgoing_emails = [
-        row for row in user_emails if row.email_account in outgoing_account_names
-    ]
-
     available_emails = frappe.db.get_all(
         "Email Account",
         filters={"enable_outgoing": 1},
         fields=["name", "email_id"],
     )
+
+    outgoing_account_names = {account.name for account in available_emails}
+    outgoing_emails = [
+        row for row in user_emails if row.email_account in outgoing_account_names
+    ]
 
     return {
         "email_signature": email_signature,
@@ -112,3 +159,36 @@ def get_current_user_email_info():
         "outgoing_emails": outgoing_emails,
         "available_emails": available_emails,
     }
+
+
+@frappe.whitelist(methods=["POST"])
+@agent_only
+def set_user_email_accounts(email_accounts: list[str]):
+    """Link the given outgoing email accounts to the current user.
+
+    User Emails is a System Manager-only table, so an agent can neither read
+    nor save it through their User document. Links to accounts without
+    outgoing email are kept.
+    """
+    outgoing_accounts = dict(
+        frappe.get_all(
+            "Email Account",
+            filters={"enable_outgoing": 1},
+            fields=["name", "email_id"],
+            as_list=True,
+        )
+    )
+    user = frappe.get_doc("User", frappe.session.user)
+    rows = {row.email_account: row for row in user.user_emails}
+    kept_links = [
+        row for row in user.user_emails if row.email_account not in outgoing_accounts
+    ]
+    agent_links = [
+        rows.get(account)
+        or {"email_account": account, "email_id": outgoing_accounts[account]}
+        for account in dict.fromkeys(email_accounts)
+        if account in outgoing_accounts
+    ]
+    user.set("user_emails", kept_links + agent_links)
+    user.flags.ignore_permlevel_for_fields = ["user_emails"]
+    user.save()

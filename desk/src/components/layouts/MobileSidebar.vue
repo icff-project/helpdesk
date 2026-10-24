@@ -10,7 +10,7 @@
         leave-from="translate-x-0"
         leave-to="-translate-x-full rtl:translate-x-full"
       >
-        <div class="relative z-10 h-full">
+        <div class="relative z-10 h-full w-fit">
           <AppSidebar mobile :profile-settings="profileSettings" />
         </div>
       </TransitionChild>
@@ -37,11 +37,11 @@ import {
   TransitionRoot,
 } from "@headlessui/vue";
 import { computed, h, watch } from "vue";
-import { useRoute, useRouter } from "vue-router";
+import { useRoute } from "vue-router";
 
 import { useAuthStore } from "@/stores/auth";
-import { isCustomerPortal } from "@/utils";
-import { useTheme } from "frappe-ui";
+import { CUSTOMER_PORTAL_ROOT } from "@/utils";
+import { useColorScheme } from "frappe-ui";
 import LucideMoon from "~icons/lucide/moon";
 import LucideSun from "~icons/lucide/sun";
 
@@ -51,10 +51,9 @@ import { __ } from "@/translation";
 import AppSidebar from "./AppSidebar.vue";
 import { useAgentStatusStore } from "@/stores/agentStatus";
 
-const { currentTheme, toggleTheme } = useTheme();
+const { colorScheme, toggleColorScheme } = useColorScheme();
 const { appsMenuOption } = useApps();
 const route = useRoute();
-const router = useRouter();
 const authStore = useAuthStore();
 
 const agentStatusStore = useAgentStatusStore();
@@ -89,29 +88,17 @@ const availabilityMenuOption = computed(() => ({
 
 const themeMenuItem = computed(() => ({
   label: __("Toggle theme"),
-  icon: currentTheme.value === "dark" ? LucideSun : LucideMoon,
-  onClick: () => toggleTheme(),
+  icon: colorScheme.value === "dark" ? LucideSun : LucideMoon,
+  onClick: () => toggleColorScheme(),
 }));
 
-const customerPortalDropdown = computed(() => [
-  themeMenuItem.value,
-  {
-    label: __("Log out"),
-    icon: "lucide-log-out",
-    onClick: () => authStore.logout(),
-  },
-]);
-
-const agentPortalDropdown = computed(() => [
+const profileSettings = computed(() => [
   appsMenuOption.value,
   ...(authStore.hasAgentRecord ? [availabilityMenuOption.value] : []),
   {
     label: __("Customer portal"),
     icon: "lucide-users",
-    onClick: () => {
-      const path = router.resolve({ name: "TicketsCustomer" });
-      window.open(path.href);
-    },
+    onClick: () => window.open(CUSTOMER_PORTAL_ROOT),
   },
   {
     icon: "lucide-life-buoy",
@@ -130,12 +117,6 @@ const agentPortalDropdown = computed(() => [
     onClick: () => authStore.logout(),
   },
 ]);
-
-const profileSettings = computed(() => {
-  return isCustomerPortal.value
-    ? customerPortalDropdown.value
-    : agentPortalDropdown.value;
-});
 
 watch(
   () => route.fullPath,

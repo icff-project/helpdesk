@@ -1,21 +1,14 @@
 import { useTags, type Tag } from "@/composables/useTags";
-import { useTicket } from "@/composables/useTicket";
+import { reloadTicketFeed, useTicket } from "@/composables/useTicket";
 import { __ } from "@/translation";
 import { call, toast } from "frappe-ui";
 import type { Command } from "./paletteTypes";
 
 import LucideTags from "~icons/lucide/tags";
 
-// useTags() mints a resource per call; hold one so drilling in twice doesn't.
-let tags: ReturnType<typeof useTags> | null = null;
-function tagList() {
-  if (!tags) tags = useTags();
-  return tags;
-}
-
 /** Toggle list: applied tags ticked; Enter flips one and pops back a level. */
 export async function tagChildren(ticketId: string): Promise<Command[]> {
-  const { tagListResource } = tagList();
+  const { tagListResource } = useTags();
   // Always refetch: tags can be created mid-session from the sidebar picker.
   await tagListResource.reload();
   const applied = appliedTags(ticketId);
@@ -51,10 +44,10 @@ async function toggleTag(ticketId: string, tag: Tag): Promise<void> {
       added: applied ? [] : [{ name: tag.name, color: tag.color || "Gray" }],
       removed: applied ? [tag.name] : [],
     });
-    const { ticket, activities } = useTicket(ticketId);
+    const { ticket } = useTicket(ticketId);
     // The response carries the new _user_tags: one round trip, no doc reload.
     if (ticket.doc) ticket.doc._user_tags = userTags;
-    activities.reload();
+    reloadTicketFeed(ticketId);
   } catch (error: any) {
     toast.error(error?.messages?.join(", ") || __("Failed to update tags"));
     throw error; // the palette flips the optimistic tick back

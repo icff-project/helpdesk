@@ -5,7 +5,10 @@
     :placeholder="placeholder"
     :editable="editable"
     :extensions="extensions"
-    :upload-function="(file:any)=>uploadFunction(file, doctype, ticketId)"
+    :upload-function="
+      (file: any, options: any) =>
+        track(uploadFunction(file, doctype, ticketId, true, options))
+    "
   >
     <template #default>
       <div @keydown.capture="handleKeydown">
@@ -133,18 +136,23 @@
           :attachments="attachments"
           @remove="removeAttachment"
         />
+        <!-- Saved reply actions, applied once the reply is sent -->
+        <SavedReplyActions
+          ref="savedReplyActionsRef"
+          class="mx-5 my-2"
+          :ticket-id="ticketId"
+          :doctype="doctype"
+        />
         <!-- Fixed Menu -->
         <div
-          class="flex justify-between overflow-scroll px-4 py-2.5 items-center border-t"
+          class="flex justify-between gap-2 overflow-scroll px-4 py-2.5 items-center border-t"
         >
-          <div class="flex items-center overflow-x-auto w-[60%]">
+          <div class="flex min-w-0 flex-1 items-center overflow-x-auto">
             <div class="inline-flex items-center gap-1.5 p-1">
               <FileUploader
-                :upload-args="{
-                  doctype: doctype,
-                  docname: ticketId,
-                  private: true,
-                }"
+                :doctype="doctype"
+                :docname="ticketId"
+                private
                 @success="
                   (f) => {
                     attachments.push(f);
@@ -152,44 +160,57 @@
                 "
               >
                 <template #default="{ openFileSelector, uploading }">
-                  {{ void (isUploading = uploading) }}
-                  <button
-                    class="flex rounded p-1 text-ink-gray-8 transition-colors focus-within:ring-0 hover:bg-surface-gray-3"
-                    @click="openFileSelector()"
-                    :disabled="uploading"
-                  >
-                    <LoadingIndicator v-if="uploading" class="h-4 w-4" />
-                    <AttachmentIcon
-                      v-else
-                      class="h-4 w-4"
-                      style="stroke-width: 1.5 !important"
-                    />
-                  </button>
+                  {{ void (attachmentUploading = uploading) }}
+                  <Tooltip :text="__('Attach file')">
+                    <button
+                      class="flex rounded-4 p-1 text-ink-gray-8 transition-colors focus-within:ring-0 hover:bg-surface-gray-3"
+                      @click="openFileSelector()"
+                      :disabled="uploading"
+                    >
+                      <LoadingIndicator v-if="uploading" class="h-4 w-4" />
+                      <AttachmentIcon
+                        v-else
+                        class="h-4 w-4"
+                        style="stroke-width: 1.5 !important"
+                      />
+                    </button>
+                  </Tooltip>
                 </template>
               </FileUploader>
-              <button
-                class="flex rounded p-1 text-ink-gray-8 transition-colors focus-within:ring-0 hover:bg-surface-gray-3"
-                @click="showSavedRepliesSelectorModal = true"
-              >
-                <SavedReplyIcon class="h-4 w-4" />
-              </button>
+              <Tooltip :text="__('Saved replies')">
+                <button
+                  class="flex rounded-4 p-1 text-ink-gray-8 transition-colors focus-within:ring-0 hover:bg-surface-gray-3"
+                  @click="showSavedRepliesSelectorModal = true"
+                >
+                  <ZapIcon class="h-4 w-4" />
+                </button>
+              </Tooltip>
               <div class="h-4 w-[2px] border-s ml-1" />
             </div>
             <EditorFixedMenu :items="fullToolbar" />
+            <EditorTableMenu />
           </div>
-          <div class="flex items-center justify-end gap-x-2 sm:mt-0 w-[40%]">
+          <div class="flex shrink-0 items-center justify-end gap-x-2">
             <Button label="Discard" @click="handleDiscard" />
-            <Button
-              variant="solid"
-              :disabled="isDisabled"
-              :loading="sendMail.loading"
-              :label="label"
-              @click="
-                () => {
-                  submitMail();
-                }
-              "
-            />
+            <!-- A disabled button fires no pointer events, so the span
+                 carries the hover for the tooltip -->
+            <Tooltip
+              :text="isUploading ? __('Please wait, media is uploading') : ''"
+            >
+              <span class="inline-flex">
+                <Button
+                  variant="solid"
+                  :disabled="isDisabled"
+                  :loading="sendMail.loading"
+                  :label="label"
+                  @click="
+                    () => {
+                      submitMail();
+                    }
+                  "
+                />
+              </span>
+            </Tooltip>
           </div>
         </div>
       </div>
@@ -207,11 +228,17 @@
 import { AttachmentList, SavedRepliesSelectorModal } from "@/components";
 import { buildEditorExtensions, fullToolbar } from "@/components/editor/config";
 import EmailMultiSelect from "@/components/EmailMultiSelect.vue";
+import { createDialog } from "@/components/dialogs";
 import { AttachmentIcon } from "@/components/icons";
-import { replyComposer } from "@/components/replyComposer";
+import SavedReplyActions from "@/components/SavedReplyActions/SavedReplyActions.vue";
 import { useTyping } from "@/composables/realtime";
 import { getUserEmailInfo } from "@/composables/useUserEmailInfo";
+import { useUploadTracker } from "@/composables/useUploadTracker";
+import { replyComposer } from "@/pages/ticket/modalStates";
 import { useAuthStore } from "@/stores/auth";
+import { useUserStore } from "@/stores/user";
+import { __ } from "@/translation";
+import { RenderedSavedReply } from "@/types";
 import {
   getFontFamily,
   htmlToText,
@@ -224,11 +251,19 @@ import { useStorage } from "@vueuse/core";
 import {
   FileUploader,
   LoadingIndicator,
+  Tooltip,
   createResource,
+  dayjs,
   toast,
 } from "frappe-ui";
-import { Editor, EditorContent, EditorFixedMenu } from "frappe-ui/editor";
-import { useOnboarding } from "frappe-ui/frappe";
+import {
+  Editor,
+  EditorContent,
+  EditorFixedMenu,
+  EditorTableMenu,
+} from "frappe-ui/editor";
+import { addPendingActivity } from "@framework/ui/ActivityTimeline";
+import { useOnboarding } from "@framework/ui";
 import {
   computed,
   nextTick,
@@ -237,7 +272,7 @@ import {
   ref,
   watch,
 } from "vue";
-import SavedReplyIcon from "./icons/SavedReplyIcon.vue";
+import ZapIcon from "~icons/lucide/zap";
 
 // ─── Props & Emits ────────────────────────────────────────────
 const props = defineProps({
@@ -275,10 +310,12 @@ const props = defineProps({
   },
 });
 
-const emit = defineEmits(["submit", "discard"]);
+const emit = defineEmits(["submit", "discard", "sending", "restore"]);
 
-const { updateOnboardingStep } = useOnboarding("helpdesk");
-const { isManager } = useAuthStore();
+const { updateOnboardingStep } = useOnboarding("helpdesk") ?? {};
+const authStore = useAuthStore();
+const { isManager } = authStore;
+const { getUser } = useUserStore();
 const { onUserType, cleanup } = useTyping(props.ticketId);
 
 const extensions = buildEditorExtensions();
@@ -374,7 +411,13 @@ const from = computed(() => {
 const hasMultipleSenders = computed(() => (from?.value.length ?? 0) > 1);
 
 const attachments = ref([]);
-const isUploading = ref(false);
+const attachmentUploading = ref(false);
+const { isUploading: editorUploading, track, dropUnused } = useUploadTracker();
+
+// The paperclip and the editor's own media buttons upload by different routes
+const isUploading = computed(
+  () => attachmentUploading.value || editorUploading.value
+);
 
 async function removeAttachment(attachment) {
   attachments.value = attachments.value.filter((a) => a !== attachment);
@@ -382,39 +425,89 @@ async function removeAttachment(attachment) {
 }
 
 const showSavedRepliesSelectorModal = ref(false);
+const savedReplyActionsRef = ref<InstanceType<typeof SavedReplyActions>>();
 
-function applySavedReplies(template: string) {
+/** A reply is only replaced when another one is already applied. */
+function applySavedReplies(reply: RenderedSavedReply) {
+  const staged = savedReplyActionsRef.value?.stagedSummary();
+  if (!staged) {
+    insertSavedReply(reply);
+    return;
+  }
+  createDialog({
+    title: __("Replace saved reply"),
+    message: __(
+      'Applying "{0}" discards the reply you have now, along with its {1} action(s).',
+      [reply.title, staged.count]
+    ),
+    actions: [
+      { label: __("Cancel") },
+      {
+        label: __("Replace"),
+        variant: "solid",
+        onClick: ({ close }: { close: () => void }) => {
+          replaceSavedReply(reply);
+          close();
+        },
+      },
+    ],
+  });
+}
+
+/** First reply of a draft: added to whatever the agent has already written. */
+function insertSavedReply(reply: RenderedSavedReply) {
   const textEditor = editorRef.value?.editor;
   if (!textEditor) return;
-  textEditor.chain().focus("start").insertContent(template).run();
+  textEditor.chain().focus("start").insertContent(reply.message).run();
+  savedReplyActionsRef.value?.add(reply);
 }
+
+/** Confirmed replace: the new reply's body and actions stand alone. */
+function replaceSavedReply(reply: RenderedSavedReply) {
+  newEmail.value = reply.message + (emailSignature.value ?? "");
+  savedReplyActionsRef.value?.add(reply);
+  focusEditorAtStart();
+}
+
+/** Set by submitMail, so the composer can be cleared before the request goes out. */
+let pendingRow: ReturnType<typeof addPendingActivity> | null = null;
+let sentDraft: {
+  content: string | null;
+  attachments: any[];
+  quoted: string | null;
+  quoteExpanded: boolean;
+} | null = null;
 
 const sendMail = createResource({
   url: "run_doc_method",
-  makeParams: () => ({
-    dt: props.doctype,
-    dn: props.ticketId,
-    method: "reply_via_agent",
-    args: {
-      attachments: attachments.value.map((x) => x.name),
-      from_email: selectedFromEmail.value,
-      to: toEmailsClone.value.join(","),
-      cc: ccEmailsClone.value?.join(","),
-      bcc: bccEmailsClone.value?.join(","),
-      message:
-        newEmail.value +
-        (quotedContentRef.value
-          ? `<p class="reply-to-content"></p><blockquote>${quotedContentRef.value.innerHTML}</blockquote>`
-          : ""),
-    },
-  }),
-  onSuccess: () => {
-    resetState();
+  makeParams: (params) => params,
+  onSuccess: (res: { message?: string } | string) => {
+    // run_doc_method answers with the whole body, since it always carries `docs`
+    const name = typeof res === "string" ? res : res?.message;
+    // the real row replaces the pending one the moment it arrives; unkeyed,
+    // it would outlive it
+    name ? pendingRow?.resolve(`email:${name}`) : pendingRow?.drop();
+    pendingRow = null;
+    sentDraft = null;
+    savedReplyActionsRef.value?.submit();
     emit("submit");
 
     if (isManager) {
-      updateOnboardingStep("reply_on_ticket");
+      updateOnboardingStep?.("reply_on_ticket");
     }
+  },
+  onError: () => {
+    toast.error(__("Could not send the reply"));
+    pendingRow?.drop();
+    pendingRow = null;
+    if (sentDraft) {
+      newEmail.value = sentDraft.content;
+      attachments.value = sentDraft.attachments;
+      quotedContent.value = sentDraft.quoted;
+      isQuoteExpanded.value = sentDraft.quoteExpanded;
+      sentDraft = null;
+    }
+    emit("restore");
   },
   debounce: 300,
 });
@@ -432,6 +525,8 @@ function submitMail() {
   if (isContentEmpty(newEmail.value) && isContentEmpty(quotedContent.value)) {
     return false;
   }
+  // The keyboard shortcut reaches here without passing the disabled button
+  if (isUploading.value || sendMail.loading) return false;
   if (
     !toEmailsClone.value.length &&
     !ccEmailsClone.value.length &&
@@ -443,7 +538,64 @@ function submitMail() {
     return false;
   }
 
-  sendMail.submit();
+  const message =
+    newEmail.value +
+    (quotedContentRef.value
+      ? `<p class="reply-to-content"></p><blockquote>${quotedContentRef.value.innerHTML}</blockquote>`
+      : "");
+  const sender = selectedFromEmail.value?.email_id ?? authStore.userId;
+  const ownEmail = getUser(authStore.userId).email;
+
+  pendingRow?.drop();
+  pendingRow = addPendingActivity(props.doctype, props.ticketId, {
+    type: "email",
+    timestamp: dayjs().format("YYYY-MM-DD HH:mm:ss"),
+    author: {
+      email: sender,
+      // the users list may still be a stub with a guessed name and no avatar
+      fullname: authStore.userName,
+      image: sender === ownEmail ? authStore.userImage : undefined,
+    },
+    data: {
+      name: "",
+      sender,
+      to: toEmailsClone.value.join(", "),
+      cc: ccEmailsClone.value?.join(", "),
+      bcc: bccEmailsClone.value?.join(", "),
+      content: message,
+      attachments: attachments.value.map((a) => ({
+        file_url: a.file_url,
+        file_name: a.file_name,
+        is_private: a.is_private,
+      })),
+    },
+  });
+  sentDraft = {
+    content: newEmail.value,
+    attachments: attachments.value,
+    quoted: quotedContent.value,
+    quoteExpanded: isQuoteExpanded.value,
+  };
+
+  const params = {
+    dt: props.doctype,
+    dn: props.ticketId,
+    method: "reply_via_agent",
+    args: {
+      attachments: attachments.value.map((x) => x.name),
+      from_email: selectedFromEmail.value,
+      to: toEmailsClone.value.join(","),
+      cc: ccEmailsClone.value?.join(","),
+      bcc: bccEmailsClone.value?.join(","),
+      message,
+    },
+  };
+
+  // drop before resetState clears, or an unmount mid-send deletes what it carries
+  dropUnused(message);
+  resetState();
+  emit("sending");
+  sendMail.submit(params);
 }
 
 function getInitialContent() {
@@ -482,6 +634,7 @@ function addToReply(
   focusEditorAtStart();
 }
 
+// Staged actions are left to `submit()`, which unstages them either way
 function resetState() {
   newEmail.value = emailSignature.value ? emailSignature.value : null;
   attachments.value = [];
@@ -492,6 +645,7 @@ function resetState() {
 
 function handleDiscard() {
   attachments.value = [];
+  savedReplyActionsRef.value?.clear();
   newEmail.value = getInitialContent();
   quotedContent.value = null;
   ccEmailsClone.value = [];
@@ -500,6 +654,7 @@ function handleDiscard() {
   showBCC.value = false;
   isQuoteExpanded.value = false;
 
+  dropUnused(null);
   focusEditorAtStart();
   emit("discard");
 }
@@ -514,6 +669,9 @@ function handleSelectAll(e: KeyboardEvent) {
   if (!editorDom.contains(active) && !(quotedEl && quotedEl.contains(active))) {
     return;
   }
+  // after the focus check: select-all from a recipient field must not unfold
+  // the quoted reply
+  isQuoteExpanded.value = true;
   e.preventDefault();
   editorContext?.commands.selectAll();
   sel.removeAllRanges();
@@ -555,7 +713,6 @@ function handleKeydown(e: KeyboardEvent) {
   const key = e.key.toLowerCase();
 
   if ((e.metaKey || e.ctrlKey) && key === "a") {
-    isQuoteExpanded.value = true;
     handleSelectAll(e);
     return;
   }
@@ -567,7 +724,14 @@ function handleKeydown(e: KeyboardEvent) {
 }
 
 watch(newEmail, (newValue, oldValue) => {
-  if (newValue !== oldValue && newValue) {
+  // The signature drops into an empty editor on load and on every reply. That
+  // is not the agent typing, and broadcasting it would show a typing indicator
+  // to everyone else on the ticket.
+  if (
+    newValue !== oldValue &&
+    !isContentEmpty(newValue) &&
+    !isOnlySignature(newValue)
+  ) {
     onUserType();
   }
   cachedEmail.value = isOnlySignature(newValue) ? null : newValue;
@@ -611,7 +775,7 @@ watch(
 
 onMounted(() => {
   // Published for the command palette, which cannot reach `editorRef` from
-  // module scope. See replyComposer.ts.
+  // module scope. See modalStates.ts.
   replyComposer.value = applySavedReplies;
   if (quotedContent.value) {
     nextTick(() => {
@@ -625,11 +789,14 @@ onMounted(() => {
 onBeforeUnmount(() => {
   replyComposer.value = null;
   cleanup();
+  // the saved draft still references what it shows, so only what it dropped goes
+  dropUnused(`${newEmail.value ?? ""}${quotedContent.value ?? ""}`);
 });
 
 defineExpose({
   addToReply,
   editor,
+  isUploading,
   submitMail,
 });
 </script>

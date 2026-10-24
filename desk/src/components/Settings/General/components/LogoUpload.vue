@@ -4,15 +4,16 @@
   >
     <div class="flex flex-col sm:flex-row items-center gap-3.5">
       <div
-        class="flex items-center justify-center min-w-16 min-h-16 rounded-lg overflow-hidden border border-outline-gray-1"
+        class="flex items-center justify-center min-w-16 min-h-16 rounded-6 overflow-hidden border border-outline-gray-1"
       >
         <Avatar
           v-if="props.image"
-          size="3xl"
+          shape="square"
+          class="size-16"
           :image="props.image"
           :label="props.title"
         />
-        <FeatherIcon v-else name="image" class="size-6 text-ink-gray-4" />
+        <LucideImage v-else class="size-6 text-ink-gray-4" />
       </div>
       <div class="flex flex-col gap-1 max-w-sm items-start">
         <span class="text-base-medium text-ink-gray-8">{{ title }}</span>
@@ -20,8 +21,10 @@
       </div>
     </div>
     <div>
+      <!-- Public: signed-out portal visitors load these. -->
       <FileUploader
         :fileTypes="['image/*']"
+        :private="false"
         @success="
           (file) => {
             emit('onUpload', file.file_url);
@@ -57,7 +60,8 @@
 </template>
 
 <script setup lang="ts">
-import { Avatar, Button, FeatherIcon, FileUploader } from "frappe-ui";
+import LucideImage from "~icons/lucide/image";
+import { Avatar, Button, FileUploader } from "frappe-ui";
 import ImageUpIcon from "~icons/lucide/image-up";
 
 const emit = defineEmits(["onUpload", "onRemove"]);

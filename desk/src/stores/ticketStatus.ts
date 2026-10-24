@@ -1,6 +1,9 @@
 import { HDTicketStatus } from "@/types/doctypes";
 import { createListResource } from "frappe-ui";
 import { defineStore } from "pinia";
+import { statusDotClass as parseColor } from "@helpdesk/shared/ticketStatus";
+
+export { parseColor };
 
 export const useTicketStatusStore = defineStore("ticketStatus", () => {
   const statuses = createListResource({
@@ -58,13 +61,3 @@ export const useTicketStatusStore = defineStore("ticketStatus", () => {
     getStatus,
   };
 });
-export function parseColor(color: string): string {
-  color = color.toLowerCase();
-  let textColor = `!text-${color}-500`;
-  if (color == "black") {
-    textColor = "!text-ink-gray-9";
-  } else if (["gray", "green"].includes(color)) {
-    textColor = `!text-${color}-500`;
-  }
-  return textColor;
-}

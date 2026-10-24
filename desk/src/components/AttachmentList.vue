@@ -1,5 +1,5 @@
 <template>
-  <div class="flex flex-wrap gap-2">
+  <div v-if="attachments.length" class="flex flex-wrap gap-2">
     <AttachmentItem
       v-for="attachment in attachments"
       :key="attachment.file_url"
@@ -9,7 +9,7 @@
       <template #suffix>
         <LucideX
           class="size-3.5 cursor-pointer text-ink-gray-6 transition-colors hover:text-ink-gray-9"
-          @click.stop="emit('remove', attachment)"
+          @click.stop.prevent="emit('remove', attachment)"
         />
       </template>
     </AttachmentItem>

@@ -27,17 +27,11 @@ export const useConfigStore = defineStore("config", () => {
   const skipEmailWorkflow: ComputedRef<boolean> = computed(
     () => !!parseInt(config.value.skip_email_workflow)
   );
-  const preferKnowledgeBase = computed(
-    () => !!parseInt(config.value.prefer_knowledge_base)
-  );
   const isFeedbackMandatory = computed(
     () => !!parseInt(config.value.is_feedback_mandatory)
   );
   const enableCommentReactions = computed(
     () => !!parseInt(config.value.enable_comment_reactions)
-  );
-  const showCustomerPortalPermissionNotice = computed(
-    () => !!parseInt(config.value.show_customer_portal_permission_notice)
   );
 
   $socket.on("helpdesk:settings-updated", () => configResource.reload());
@@ -48,13 +42,11 @@ export const useConfigStore = defineStore("config", () => {
     brandLogo,
     favicon,
     config,
-    preferKnowledgeBase,
     skipEmailWorkflow,
     isFeedbackMandatory,
     teamRestrictionApplied,
     assignWithinTeam,
     disableGlobalScopeForSavedReplies,
     enableCommentReactions,
-    showCustomerPortalPermissionNotice,
   };
 });

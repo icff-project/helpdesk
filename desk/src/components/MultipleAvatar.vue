@@ -1,11 +1,12 @@
 <template>
   <div
     v-if="_avatars?.length"
-    class="me-1.5 flex min-w-0 cursor-pointer items-center"
+    class="isolate me-1.5 flex min-w-0 cursor-pointer items-center"
   >
     <div
       v-if="_avatars?.length == 1"
-      class="flex min-w-0 items-center gap-2 text-base line-clamp-1"
+      class="user-avatar flex min-w-0 items-center gap-2 text-base line-clamp-1"
+      :data-name="_avatars[0].name"
     >
       <Tooltip :text="_avatars[0].name">
         <Avatar
@@ -50,8 +51,10 @@ import { Avatar, Tooltip } from "frappe-ui";
 import { computed } from "vue";
 
 const props = defineProps({
+  // Frappe hands `_assign` over as a JSON string; callers with the list
+  // already parsed pass the array itself.
   avatars: {
-    type: String,
+    type: [String, Array],
   },
   size: {
     type: String,

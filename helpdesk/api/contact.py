@@ -5,7 +5,11 @@ from frappe.core.api.user_invitation import invite_by_email
 from frappe.desk.reportview import delete_bulk
 from frappe.utils import validate_phone_number_with_country_code
 
-from helpdesk.utils import get_country_from_timezone, get_customers
+from helpdesk.utils import (
+    CUSTOMER_PORTAL_ROOT,
+    get_country_from_timezone,
+    get_customers,
+)
 
 
 @frappe.whitelist(methods=["GET"])
@@ -103,7 +107,7 @@ def create_contact(doc: dict, invite: bool = False) -> str:
         invite_by_email(
             email,
             ["HD Customer"],
-            redirect_to_path="/helpdesk",
+            redirect_to_path=CUSTOMER_PORTAL_ROOT,
             app_name="helpdesk",
             contact=contact_doc.name,
             customer=doc.get("customer"),
@@ -151,9 +155,10 @@ def edit_contact(name: str, doc: dict):
 
     if user := contact_doc.get("user"):
         user_doc = frappe.get_doc("User", user)
-        user_doc.user_image = doc.get("image", "")
-        user_doc.time_zone = doc.get("timezone", "")
-        user_doc.save()
+        user_doc.user_image = doc.get("image", user_doc.user_image)
+        user_doc.time_zone = doc.get("timezone", user_doc.time_zone)
+        # the caller passed the Contact write check, and only the photo and timezone change
+        user_doc.save(ignore_permissions=True)
 
     return contact_doc.name
 
